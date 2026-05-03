@@ -57,6 +57,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         ],
         "remove_duplicates": True,
         "keep_top_n_per_rep": 3000,
+        "min_candidates_per_client": 6,
         "cache": True,
         "max_route_km_median_multiplier": 2.8,
     },

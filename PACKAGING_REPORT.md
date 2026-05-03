@@ -2,14 +2,12 @@
 
 ## Status
 
-PARTIAL
+PASS
 
 Packaging structure, runtime path handling, dependency split, PyInstaller spec,
 release scripts, logging helpers, OSRM status check, and user documentation were
-added. Local smoke checks passed.
-
-The PyInstaller build configuration is real, but an executable build should be
-performed on the target Windows release machine before marking the release PASS.
+added. PyInstaller one-folder build was executed successfully and the packaged
+EXE was smoke-tested.
 
 ## Added files
 
@@ -57,6 +55,12 @@ Expected executable:
 dist\SalesPVRP\SalesPVRP.exe
 ```
 
+Verified ready executable:
+
+```text
+D:\Programming\Schedule_TP\sales_pvrp_scheduler\dist\SalesPVRP\SalesPVRP.exe
+```
+
 The build scripts copy editable runtime files into `dist\SalesPVRP` after
 PyInstaller completes, so the executable can run directly from `dist`.
 
@@ -84,6 +88,13 @@ GUI dependencies are in `requirements-gui.txt`.
 
 Developer/build dependencies are in `requirements-dev.txt`.
 
+PyInstaller spec includes:
+
+- PySide6 QtCore/QtGui/QtWidgets hidden imports
+- collected submodules for sklearn, ortools, yaml, folium, and openpyxl
+- OR-Tools dynamic libraries from `ortools\.libs`
+- external runtime files copied next to the executable after build
+
 ## PyVRP
 
 `pyvrp` is marked optional in `requirements-optional.txt`. The current runtime
@@ -104,6 +115,7 @@ developer or release machine.
 
 Verified locally:
 
+- `python run_gui.py` started successfully and stayed alive during an offscreen GUI smoke window.
 - `python -m py_compile ...` passed for changed Python files.
 - `python main.py --version` returned `Sales PVRP Scheduler v0.1.0 (dev)`.
 - `python scripts\check_gui_import.py` passed.
@@ -111,19 +123,41 @@ Verified locally:
 - `python scripts\release_smoke_test.py` passed and created Excel output.
 - `python scripts\smoke_test.py` passed and verified Excel sheets.
 - `python -m pytest tests` passed: 5 tests.
+- `scripts\build_exe.bat` completed successfully.
+- `dist\SalesPVRP\SalesPVRP.exe` started successfully with a sanitized PATH and stayed alive during an offscreen smoke window.
+- GUI sample-load smoke passed with `data/sample_clients.xlsx` and loaded 40 rows.
+
+Verified `dist\SalesPVRP` structure:
+
+```text
+dist\SalesPVRP\
+  SalesPVRP.exe
+  config.yaml
+  README_USER.md
+  data\
+    input_clients_template.xlsx
+    sample_clients.xlsx
+  output\
+  cache\
+  logs\
+  _internal\
+```
 
 ## Known issues
 
-- PyInstaller build was not committed as a binary artifact; build it locally on
-  Windows before release.
 - The app uses a PNG for the Qt window icon. A Windows `.ico` can be added later
   for the executable file icon.
 - OSRM is optional. If unavailable, haversine fallback is used and route
   distances are approximate.
+- The default production-style config returns controlled `infeasible` for the
+  small sample workbook. The lighter smoke config in `scripts\release_smoke_test.py`
+  produces a successful Excel output.
+- PyInstaller emits benign warnings for optional modules such as sklearn's torch
+  compatibility namespace and some optional scipy/pycparser internals.
 
 ## Recommendations
 
-- Run `scripts\prepare_release.bat` on a clean Windows venv before release.
+- Run `scripts\prepare_release.bat` when a separate `release\SalesPVRP` folder is needed.
 - Test `release\SalesPVRP\SalesPVRP.exe` by opening `data\sample_clients.xlsx`.
 - Keep `fallback_to_haversine: true` in distributed `config.yaml`.
 - Add code signing and an installer wrapper after the one-folder build is stable.

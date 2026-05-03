@@ -4,7 +4,7 @@
 
 PARTIAL
 
-The validation framework, synthetic datasets, unit tests, and small end-to-end logic validation are passing. Full 1800-client optimization was not executed in this report snapshot because it is intentionally handled by the long-running performance runner.
+The validation framework, synthetic datasets, unit tests, and small end-to-end logic validation are passing. The full 1800-client performance run completed but returned INFEASIBLE, so the overall project logic-validation status remains PARTIAL rather than PASS.
 
 ## Synthetic datasets generated
 
@@ -23,12 +23,13 @@ python scripts/run_performance_test_1800.py
 python -m pytest
 ```
 
-Executed in this validation pass:
+Executed in the latest validation pass:
 
-- `python -m pytest` -> 16 passed.
+- `python -m pytest` -> 17 passed.
 - `python scripts/run_logic_validation.py --input data/synthetic_small_feasible.xlsx --time-limit 60 --candidates-per-rep 500` -> PASS.
 - `python scripts/run_logic_validation.py --input data/synthetic_infeasible_capacity.xlsx` -> expected FAIL at input validation, 19 errors.
 - `python scripts/run_logic_validation.py --input data/synthetic_bad_coordinates.xlsx` -> expected FAIL at input validation, 9 errors.
+- `python scripts/run_performance_test_1800.py` -> INFEASIBLE.
 
 ## Frequency validation
 
@@ -62,7 +63,7 @@ Small end-to-end run:
 
 ## Performance results
 
-Not executed in this report snapshot. Use:
+Executed with:
 
 ```bash
 python scripts/run_performance_test_1800.py
@@ -73,11 +74,21 @@ Outputs:
 - `output/logic_validation/performance_1800_report.json`
 - `output/logic_validation/performance_1800_report.md`
 
+Latest result:
+
+- Status: INFEASIBLE.
+- Validation stage: 0.22s.
+- Matrix building: 0.06s.
+- Candidate generation: 277.27s.
+- Solver diagnostics: 8 clients had low candidate coverage, including `C00198`, `C00233`, `C00986`, `C01111`, `C01257`, `C01312`, `C01546`, and `C01730`.
+- No final Excel schedule was produced for the 1800-client run.
+
 ## Issues found
 
 - The existing backend validation checks world coordinate ranges but not Sofia-region bounds; the new audit layer adds Sofia/Sofia-region geofence checks for synthetic validation.
 - Full 1800 optimization may require significant solver time. The performance runner reports runtime without changing the solver.
 - Earlier random small feasible data was solver-infeasible because candidate coverage/exact cover was too weak for a small route-first instance. The small fixture was changed to a controlled compact exact-cover smoke dataset; full and medium synthetic datasets retain realistic mixed frequencies and geographic noise.
+- Full 1800 generated input is capacity-feasible, but current candidate generation/master selection could not find a feasible exact route-first solution with the default performance settings.
 
 ## Candidate coverage summary
 

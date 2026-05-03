@@ -54,6 +54,120 @@ def _cluster_centers(df: pd.DataFrame) -> pd.DataFrame:
     return df.groupby("cluster_id").agg(lat=("lat", "mean"), lon=("lon", "mean")).reset_index()
 
 
+def _coverage_targets(df_rep: pd.DataFrame, config: dict) -> dict[str, int]:
+    """Return minimum post-pruning candidate coverage by client."""
+    min_coverage = int(config["candidate_routes"].get("min_candidates_per_client", 0))
+    return {
+        str(row.client_id): max(int(row.visit_frequency), min_coverage)
+        for row in df_rep[["client_id", "visit_frequency"]].itertuples(index=False)
+    }
+
+
+def _coverage_counts(candidates: pd.DataFrame, client_ids: list[str]) -> dict[str, int]:
+    """Count how many candidate routes contain each client."""
+    counts = {cid: 0 for cid in client_ids}
+    if candidates.empty:
+        return counts
+    for ids in candidates["client_ids"]:
+        for cid in ids:
+            if cid in counts:
+                counts[cid] += 1
+    return counts
+
+
+def _repair_groups_for_client(
+    client_id: str,
+    client_ids_all: list[str],
+    id_to_idx: dict[str, int],
+    matrix: np.ndarray,
+    min_clients: int,
+    target: int,
+    max_clients: int,
+) -> list[list[str]]:
+    """Create varied compact neighborhood groups that all contain client_id."""
+    others = [cid for cid in sorted(client_ids_all, key=lambda other: float(matrix[id_to_idx[client_id], id_to_idx[other]])) if cid != client_id]
+    groups: list[list[str]] = []
+    sizes = sorted({max(min_clients, min(target, len(client_ids_all))), min(max_clients, max(min_clients, target + 1)), min(max_clients, len(client_ids_all))})
+    for size in sizes:
+        groups.append([client_id] + others[: max(0, size - 1)])
+
+    route_size = max(min_clients, min(target, max_clients, len(client_ids_all)))
+    max_offset = min(16, max(0, len(others) - route_size + 1))
+    for offset in range(max_offset):
+        groups.append([client_id] + others[offset : offset + route_size - 1])
+    return [list(dict.fromkeys(group)) for group in groups if group]
+
+
+def _selection_score(candidates: pd.DataFrame) -> pd.Series:
+    """Score candidates for pruning while keeping route-first costs dominant."""
+    return (
+        candidates["route_km"].astype(float)
+        + candidates["underfilled_penalty"].astype(float) * 5
+        + candidates["overfilled_penalty"].astype(float) * 5
+        + candidates["cluster_mixing_penalty"].astype(float) * 2
+    )
+
+
+def _top_up_candidate_coverage(
+    selected: pd.DataFrame,
+    candidate_pool: pd.DataFrame,
+    df_rep: pd.DataFrame,
+    matrix_data: dict[str, Any],
+    config: dict,
+    client_ids_all: list[str],
+    id_to_idx: dict[str, int],
+    matrix: np.ndarray,
+) -> pd.DataFrame:
+    """Add best supplemental routes until every client has enough coverage."""
+    selected = selected.copy()
+    candidate_pool = candidate_pool.copy()
+    targets = _coverage_targets(df_rep, config)
+    min_clients = int(config["daily_route"]["min_clients"])
+    target_clients = int(config["daily_route"]["target_clients"])
+    max_clients = int(config["daily_route"]["max_clients"])
+
+    for _ in range(3):
+        counts = _coverage_counts(selected, client_ids_all)
+        low_clients = [cid for cid in client_ids_all if counts.get(cid, 0) < targets[cid]]
+        if not low_clients:
+            break
+
+        supplemental_raw: list[dict[str, Any]] = []
+        for cid in low_clients:
+            available_count = int(candidate_pool["client_ids"].map(lambda ids, cid=cid: cid in ids).sum())
+            if available_count >= targets[cid]:
+                continue
+            for group in _repair_groups_for_client(cid, client_ids_all, id_to_idx, matrix, min_clients, target_clients, max_clients):
+                _add_candidate(supplemental_raw, group, "coverage_repair", df_rep, matrix_data, config)
+
+        if supplemental_raw:
+            supplemental = pd.DataFrame(supplemental_raw)
+            supplemental["set_key"] = supplemental["client_ids"].map(_client_set_key)
+            supplemental["selection_score"] = _selection_score(supplemental)
+            candidate_pool = pd.concat([candidate_pool, supplemental], ignore_index=True)
+            candidate_pool = candidate_pool.sort_values(["selection_score", "route_km"]).drop_duplicates("set_key", keep="first").reset_index(drop=True)
+
+        selected_keys = set(selected["set_key"])
+        added_any = False
+        for cid in sorted(low_clients, key=lambda c: counts.get(c, 0)):
+            counts = _coverage_counts(selected, client_ids_all)
+            needed = targets[cid] - counts.get(cid, 0)
+            if needed <= 0:
+                continue
+            available = candidate_pool[candidate_pool["client_ids"].map(lambda ids, cid=cid: cid in ids)]
+            available = available[~available["set_key"].isin(selected_keys)].sort_values(["selection_score", "route_km"])
+            if available.empty:
+                continue
+            to_add = available.head(needed).copy()
+            selected = pd.concat([selected, to_add], ignore_index=True)
+            selected_keys.update(to_add["set_key"].tolist())
+            added_any = True
+
+        if not added_any:
+            break
+    return selected
+
+
 def _add_candidate(raw: list[dict[str, Any]], client_ids: list[str], method: str, df_rep: pd.DataFrame, matrix_data: dict[str, Any], config: dict) -> None:
     target = int(config["daily_route"]["target_clients"])
     min_clients = int(config["daily_route"]["min_clients"])
@@ -177,11 +291,8 @@ def generate_candidate_routes_for_rep(df_rep: pd.DataFrame, matrix_data: dict[st
     if median_km > 0:
         candidates = candidates[candidates["route_km"].le(median_km * max_multiplier)]
 
-    # Guarantee that every client appears at least once.
-    coverage_counts = {cid: 0 for cid in client_ids_all}
-    for ids in candidates["client_ids"]:
-        for cid in ids:
-            coverage_counts[cid] = coverage_counts.get(cid, 0) + 1
+    # Guarantee that every client appears at least once before final pruning.
+    coverage_counts = _coverage_counts(candidates, client_ids_all)
     for cid, count in coverage_counts.items():
         if count == 0:
             nearest = sorted(client_ids_all, key=lambda other: float(matrix[id_to_idx[cid], id_to_idx[other]]))
@@ -191,18 +302,24 @@ def generate_candidate_routes_for_rep(df_rep: pd.DataFrame, matrix_data: dict[st
     candidates = candidates.sort_values(["route_km", "cluster_count"]).drop_duplicates("set_key", keep="first")
 
     keep_top = int(config["candidate_routes"].get("keep_top_n_per_rep", requested))
-    candidates["selection_score"] = candidates["route_km"] + candidates["underfilled_penalty"] * 5 + candidates["overfilled_penalty"] * 5 + candidates["cluster_mixing_penalty"] * 2
+    candidates["selection_score"] = _selection_score(candidates)
+    candidate_pool = candidates.copy()
     essential = candidates[candidates["generation_method"].isin(["cluster", "coverage_repair"])].copy()
     top = candidates.nsmallest(keep_top, "selection_score").copy()
     candidates = pd.concat([top, essential], ignore_index=True)
     candidates["set_key"] = candidates["client_ids"].map(_client_set_key)
     candidates = candidates.sort_values(["selection_score", "route_km"]).drop_duplicates("set_key", keep="first").reset_index(drop=True)
+    candidates = _top_up_candidate_coverage(candidates, candidate_pool, df_rep, matrix_data, config, client_ids_all, id_to_idx, matrix)
+    candidates = candidates.sort_values(["selection_score", "route_km"]).drop_duplicates("set_key", keep="first").reset_index(drop=True)
     candidates["candidate_id"] = [f"{str(df_rep['sales_rep'].iloc[0]).replace(' ', '_')}_{i:05d}" for i in range(len(candidates))]
     candidates = candidates.drop(columns=["set_key", "selection_score"], errors="ignore")
 
     coverage_rows = []
+    coverage_counts = _coverage_counts(candidates, client_ids_all)
+    coverage_targets = _coverage_targets(df_rep, config)
     for row in df_rep.itertuples(index=False):
-        count = int(sum(str(row.client_id) in ids for ids in candidates["client_ids"]))
+        count = coverage_counts[str(row.client_id)]
+        target_count = coverage_targets[str(row.client_id)]
         coverage_rows.append(
             {
                 "sales_rep": row.sales_rep,
@@ -210,7 +327,8 @@ def generate_candidate_routes_for_rep(df_rep: pd.DataFrame, matrix_data: dict[st
                 "client_name": row.client_name,
                 "visit_frequency": int(row.visit_frequency),
                 "number_of_candidates_containing_client": count,
-                "severity": "ERROR" if count == 0 else ("WARNING" if count < int(row.visit_frequency) else "OK"),
+                "min_recommended_candidate_coverage": target_count,
+                "severity": "ERROR" if count == 0 else ("WARNING" if count < target_count else "OK"),
             }
         )
     coverage_df = pd.DataFrame(coverage_rows)

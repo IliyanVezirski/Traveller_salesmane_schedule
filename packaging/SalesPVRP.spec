@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
 
 
 ROOT = Path(SPECPATH).resolve().parent
@@ -35,7 +35,7 @@ hiddenimports.extend(
 a = Analysis(
     [str(ROOT / "run_gui.py")],
     pathex=[str(ROOT)],
-    binaries=[],
+    binaries=collect_dynamic_libs("ortools"),
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

@@ -184,17 +184,17 @@ def main() -> int:
 
         with _timer(timings, "master_solving"):
             solver_result = solve_pvrp_master(clients_clustered, calendar_df, candidates_df, config)
-            if solver_result["selected_candidates"].empty:
-                payload.update(
-                    {
-                        "status": "infeasible",
-                        "solver_status": solver_result["status"],
-                        "solver_warnings": solver_result.get("warnings", []),
-                    }
-                )
-                _write_reports(output_dir, payload)
-                print(f"Performance status: {payload['status']}")
-                return 2
+        if solver_result["selected_candidates"].empty:
+            payload.update(
+                {
+                    "status": "infeasible",
+                    "solver_status": solver_result["status"],
+                    "solver_warnings": solver_result.get("warnings", []),
+                }
+            )
+            _write_reports(output_dir, payload)
+            print(f"Performance status: {payload['status']}")
+            return 2
 
         with _timer(timings, "final_routing"):
             selected_candidates = improve_solution(
