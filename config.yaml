@@ -18,6 +18,7 @@ candidate_routes:
   candidates_per_rep: 3000
   random_seed: 42
   generation_methods:
+    - periodic_seed
     - cluster
     - cluster_neighbors
     - sweep
@@ -40,6 +41,7 @@ route_costing:
   method: "nearest_neighbor_2opt"
   final_method: "pyvrp"
   pyvrp_time_limit_seconds: 3
+  pyvrp_max_iterations: 500
   route_type: "open"
   use_duration_if_available: true
 
@@ -47,6 +49,8 @@ optimization:
   solver: "ortools_cpsat"
   time_limit_seconds: 3600
   num_workers: 8
+  decompose_by_sales_rep: true
+  stop_after_first_solution: false
   log_search_progress: true
 
 weights:

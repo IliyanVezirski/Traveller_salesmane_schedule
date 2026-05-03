@@ -33,7 +33,7 @@ def _calculate_pyvrp_open_route_cost(client_ids: list[str], matrix_data: dict[st
     """Use PyVRP to optimize an open daily route with a zero-cost dummy depot."""
     try:
         from pyvrp import Model
-        from pyvrp.stop import MaxRuntime
+        from pyvrp.stop import MaxIterations, MaxRuntime
     except ImportError as exc:
         raise RuntimeError("PyVRP is not installed.") from exc
 
@@ -61,8 +61,9 @@ def _calculate_pyvrp_open_route_cost(client_ids: list[str], matrix_data: dict[st
                 distance = int(round(float(distance_matrix[id_to_idx[from_client], id_to_idx[to_client]])))
             model.add_edge(frm, to, distance=distance, duration=distance)
 
-    runtime = float(config["route_costing"].get("pyvrp_time_limit_seconds", 3))
-    result = model.solve(MaxRuntime(runtime), seed=int(config["candidate_routes"].get("random_seed", 42)), collect_stats=False, display=False)
+    max_iterations = int(config["route_costing"].get("pyvrp_max_iterations", 0) or 0)
+    stop = MaxIterations(max_iterations) if max_iterations > 0 else MaxRuntime(float(config["route_costing"].get("pyvrp_time_limit_seconds", 3)))
+    result = model.solve(stop, seed=int(config["candidate_routes"].get("random_seed", 42)), collect_stats=False, display=False)
     if not result.is_feasible():
         raise RuntimeError("PyVRP did not find a feasible final route.")
 

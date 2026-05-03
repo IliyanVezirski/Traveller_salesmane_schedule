@@ -36,8 +36,16 @@ def _diagnostics(clients_df: pd.DataFrame, candidates_df: pd.DataFrame, config: 
     return warnings
 
 
-def solve_pvrp_master(clients_df: pd.DataFrame, calendar_df: pd.DataFrame, candidates_df: pd.DataFrame, config: dict) -> dict[str, Any]:
-    """Solve the route-first PVRP master problem with CP-SAT."""
+def _config_with_time_limit(config: dict, time_limit_seconds: float) -> dict:
+    """Return a shallow config copy with an overridden solver time limit."""
+    updated = dict(config)
+    updated["optimization"] = dict(config["optimization"])
+    updated["optimization"]["time_limit_seconds"] = time_limit_seconds
+    return updated
+
+
+def _solve_pvrp_master_single(clients_df: pd.DataFrame, calendar_df: pd.DataFrame, candidates_df: pd.DataFrame, config: dict) -> dict[str, Any]:
+    """Solve one independent sales_rep route-first PVRP master problem."""
     model = cp_model.CpModel()
     weights = config["weights"]
     candidate_rows = {str(r.candidate_id): r for r in candidates_df.itertuples(index=False)}
@@ -48,6 +56,13 @@ def solve_pvrp_master(clients_df: pd.DataFrame, calendar_df: pd.DataFrame, candi
     for candidate_id in candidate_rows:
         for day in days:
             z[(candidate_id, day)] = model.NewBoolVar(f"z_{candidate_id}_{day}")
+
+    for candidate_id, row in candidate_rows.items():
+        intended_day = getattr(row, "intended_day_index", None)
+        if intended_day is not None and not pd.isna(intended_day):
+            intended_day_int = int(intended_day)
+            if intended_day_int in days:
+                model.AddHint(z[(candidate_id, intended_day_int)], 1)
 
     # One route per rep per day.
     for sales_rep, rep_candidates in candidates_df.groupby("sales_rep"):
@@ -140,6 +155,7 @@ def solve_pvrp_master(clients_df: pd.DataFrame, calendar_df: pd.DataFrame, candi
     solver.parameters.max_time_in_seconds = float(config["optimization"]["time_limit_seconds"])
     solver.parameters.num_search_workers = int(config["optimization"]["num_workers"])
     solver.parameters.log_search_progress = bool(config["optimization"].get("log_search_progress", False))
+    solver.parameters.stop_after_first_solution = bool(config["optimization"].get("stop_after_first_solution", False))
     status = solver.Solve(model)
     status_name = solver.StatusName(status)
 
@@ -156,3 +172,64 @@ def solve_pvrp_master(clients_df: pd.DataFrame, calendar_df: pd.DataFrame, candi
             selected_rows.append(base)
     selected_df = pd.DataFrame(selected_rows)
     return {"status": status_name, "selected_candidates": selected_df, "objective_value": solver.ObjectiveValue(), "solver_wall_time": solver.WallTime(), "warnings": []}
+
+
+def solve_pvrp_master(clients_df: pd.DataFrame, calendar_df: pd.DataFrame, candidates_df: pd.DataFrame, config: dict) -> dict[str, Any]:
+    """Solve the route-first PVRP master problem with CP-SAT."""
+    sales_reps = sorted(str(rep) for rep in clients_df["sales_rep"].dropna().unique())
+    should_decompose = bool(config["optimization"].get("decompose_by_sales_rep", True)) and len(sales_reps) > 1
+    if not should_decompose:
+        return _solve_pvrp_master_single(clients_df, calendar_df, candidates_df, config)
+
+    total_time_limit = float(config["optimization"]["time_limit_seconds"])
+    per_rep_time_limit = max(30.0, total_time_limit / max(1, len(sales_reps)))
+    selected_frames: list[pd.DataFrame] = []
+    warnings: list[str] = []
+    statuses: list[str] = []
+    objective_value = 0.0
+    wall_time = 0.0
+
+    for sales_rep in sales_reps:
+        rep_clients = clients_df[clients_df["sales_rep"].astype(str).eq(sales_rep)].copy()
+        rep_candidates = candidates_df[candidates_df["sales_rep"].astype(str).eq(sales_rep)].copy()
+        if rep_candidates.empty:
+            return {
+                "status": "INFEASIBLE",
+                "selected_candidates": pd.DataFrame(),
+                "objective_value": None,
+                "solver_wall_time": wall_time,
+                "warnings": [f"Sales rep {sales_rep} has no candidate routes."],
+            }
+
+        rep_result = _solve_pvrp_master_single(rep_clients, calendar_df, rep_candidates, _config_with_time_limit(config, per_rep_time_limit))
+        statuses.append(str(rep_result["status"]))
+        wall_time += float(rep_result["solver_wall_time"])
+        if rep_result["selected_candidates"].empty:
+            rep_warnings = rep_result.get("warnings", [])
+            warnings.extend([f"{sales_rep}: {warning}" for warning in rep_warnings])
+            return {
+                "status": str(rep_result["status"]),
+                "selected_candidates": pd.DataFrame(),
+                "objective_value": None,
+                "solver_wall_time": wall_time,
+                "warnings": warnings,
+            }
+
+        selected_frames.append(rep_result["selected_candidates"])
+        if rep_result.get("objective_value") is not None:
+            objective_value += float(rep_result["objective_value"])
+
+    if all(status == "OPTIMAL" for status in statuses):
+        status_name = "OPTIMAL"
+    elif all(status in {"OPTIMAL", "FEASIBLE"} for status in statuses):
+        status_name = "FEASIBLE"
+    else:
+        status_name = ",".join(statuses)
+
+    return {
+        "status": status_name,
+        "selected_candidates": pd.concat(selected_frames, ignore_index=True) if selected_frames else pd.DataFrame(),
+        "objective_value": objective_value,
+        "solver_wall_time": wall_time,
+        "warnings": warnings,
+    }

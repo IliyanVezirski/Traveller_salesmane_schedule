@@ -49,6 +49,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "candidates_per_rep": 3000,
         "random_seed": 42,
         "generation_methods": [
+            "periodic_seed",
             "cluster",
             "cluster_neighbors",
             "sweep",
@@ -72,6 +73,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "method": "nearest_neighbor_2opt",
         "final_method": "pyvrp",
         "pyvrp_time_limit_seconds": 3,
+        "pyvrp_max_iterations": 500,
         "route_type": "open",
         "use_duration_if_available": True,
     },
@@ -79,6 +81,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "solver": "ortools_cpsat",
         "time_limit_seconds": 3600,
         "num_workers": 8,
+        "decompose_by_sales_rep": True,
+        "stop_after_first_solution": False,
         "log_search_progress": True,
     },
     "weights": {

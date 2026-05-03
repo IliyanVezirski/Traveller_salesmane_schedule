@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import pickle
 from pathlib import Path
@@ -22,7 +23,21 @@ def _client_set_key(client_ids: Iterable[str]) -> tuple[str, ...]:
 def _candidate_cache_file(df_rep: pd.DataFrame, config: dict) -> Path:
     rep = str(df_rep["sales_rep"].iloc[0]).replace(" ", "_")
     payload = "|".join(f"{r.client_id}:{r.cluster_id}:{r.lat:.6f}:{r.lon:.6f}" for r in df_rep.sort_values("client_id").itertuples())
-    payload += f"|{config['candidate_routes'].get('random_seed')}|{config['daily_route']}"
+    cache_config = {
+        "candidate_routes": {
+            "random_seed": config["candidate_routes"].get("random_seed"),
+            "generation_methods": config["candidate_routes"].get("generation_methods"),
+            "keep_top_n_per_rep": config["candidate_routes"].get("keep_top_n_per_rep"),
+            "min_candidates_per_client": config["candidate_routes"].get("min_candidates_per_client"),
+            "max_route_km_median_multiplier": config["candidate_routes"].get("max_route_km_median_multiplier"),
+        },
+        "daily_route": config["daily_route"],
+        "route_costing": {
+            "method": config["route_costing"].get("method"),
+            "route_type": config["route_costing"].get("route_type"),
+        },
+    }
+    payload += "|" + json.dumps(cache_config, sort_keys=True)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
     return get_cache_dir() / "candidate_routes" / f"{rep}_{digest}.pkl"
 
@@ -168,7 +183,100 @@ def _top_up_candidate_coverage(
     return selected
 
 
-def _add_candidate(raw: list[dict[str, Any]], client_ids: list[str], method: str, df_rep: pd.DataFrame, matrix_data: dict[str, Any], config: dict) -> None:
+def _split_weekday_values(value: Any) -> set[str]:
+    """Parse comma/semicolon-separated weekday values."""
+    if pd.isna(value) or value is None or str(value).strip() == "":
+        return set()
+    return {part.strip() for part in str(value).replace(";", ",").split(",") if part.strip()}
+
+
+def _calendar_days(config: dict) -> list[dict[str, int | str]]:
+    """Build lightweight day metadata without importing the calendar module."""
+    weekdays = config["working_days"]["weekdays"]
+    days: list[dict[str, int | str]] = []
+    for week in range(1, int(config["working_days"]["weeks"]) + 1):
+        for weekday_index, weekday in enumerate(weekdays):
+            days.append(
+                {
+                    "day_index": len(days),
+                    "week_index": week,
+                    "weekday": weekday,
+                    "weekday_index": weekday_index,
+                }
+            )
+    return days
+
+
+def _frequency_patterns(visit_frequency: int, config: dict) -> list[list[int]]:
+    """Return valid day-index patterns for a client's visit frequency."""
+    weekdays = list(range(len(config["working_days"]["weekdays"])))
+    if visit_frequency == 2:
+        return [[(week - 1) * 5 + weekday for week in week_pair] for week_pair in [(1, 3), (2, 4)] for weekday in weekdays]
+    if visit_frequency == 4:
+        return [[(week - 1) * 5 + weekday for week in range(1, 5)] for weekday in weekdays]
+    if visit_frequency == 8:
+        good_pairs = [(0, 3), (1, 4), (0, 2), (1, 3), (2, 4)]
+        return [[(week - 1) * 5 + weekday for week in range(1, 5) for weekday in pair] for pair in good_pairs]
+    return []
+
+
+def _filter_patterns_for_weekdays(patterns: list[list[int]], row: Any, day_by_index: dict[int, dict[str, int | str]]) -> list[list[int]]:
+    """Prefer patterns that respect fixed/forbidden/preferred weekday metadata."""
+    forbidden = _split_weekday_values(getattr(row, "forbidden_weekdays", None))
+    fixed = _split_weekday_values(getattr(row, "fixed_weekday", None))
+    preferred = _split_weekday_values(getattr(row, "preferred_weekdays", None))
+    feasible = [pattern for pattern in patterns if not any(str(day_by_index[day]["weekday"]) in forbidden for day in pattern)]
+    if fixed:
+        fixed_feasible = [pattern for pattern in feasible if all(str(day_by_index[day]["weekday"]) in fixed for day in pattern)]
+        if fixed_feasible:
+            feasible = fixed_feasible
+    if preferred:
+        preferred_feasible = [pattern for pattern in feasible if all(str(day_by_index[day]["weekday"]) in preferred for day in pattern)]
+        if preferred_feasible:
+            feasible = preferred_feasible
+    return feasible or patterns
+
+
+def _add_periodic_seed_candidates(raw: list[dict[str, Any]], df_rep: pd.DataFrame, matrix_data: dict[str, Any], config: dict) -> None:
+    """Add a frequency-feasible seed schedule as route-first candidates."""
+    days = _calendar_days(config)
+    day_by_index = {int(day["day_index"]): day for day in days}
+    buckets: dict[int, list[str]] = {int(day["day_index"]): [] for day in days}
+    target = int(config["daily_route"]["target_clients"])
+    max_clients = int(config["daily_route"]["max_clients"])
+
+    sorted_df = df_rep.sort_values(["visit_frequency", "cluster_id", "client_id"], ascending=[False, True, True])
+    for row in sorted_df.itertuples(index=False):
+        patterns = _filter_patterns_for_weekdays(_frequency_patterns(int(row.visit_frequency), config), row, day_by_index)
+        best_pattern: list[int] | None = None
+        best_score: tuple[int, int, int, int] | None = None
+        for pattern in patterns:
+            projected = [len(buckets[day]) + 1 for day in pattern]
+            hard_over = sum(max(0, load - max_clients) for load in projected)
+            target_over = sum(max(0, load - target) for load in projected)
+            score = (hard_over, max(projected), target_over, sum(len(buckets[day]) for day in pattern))
+            if best_score is None or score < best_score:
+                best_score = score
+                best_pattern = pattern
+        if best_pattern is None:
+            continue
+        for day in best_pattern:
+            buckets[day].append(str(row.client_id))
+
+    for day, client_ids in buckets.items():
+        if client_ids:
+            _add_candidate(raw, client_ids, "periodic_seed", df_rep, matrix_data, config, intended_day_index=day)
+
+
+def _add_candidate(
+    raw: list[dict[str, Any]],
+    client_ids: list[str],
+    method: str,
+    df_rep: pd.DataFrame,
+    matrix_data: dict[str, Any],
+    config: dict,
+    intended_day_index: int | None = None,
+) -> None:
     target = int(config["daily_route"]["target_clients"])
     min_clients = int(config["daily_route"]["min_clients"])
     max_clients = int(config["daily_route"]["max_clients"])
@@ -201,6 +309,7 @@ def _add_candidate(raw: list[dict[str, Any]], client_ids: list[str], method: str
             "underfilled_penalty": max(0, target - n),
             "overfilled_penalty": max(0, n - target),
             "cluster_mixing_penalty": max(0, cluster_count - 1),
+            "intended_day_index": intended_day_index,
         }
     )
 
@@ -221,6 +330,10 @@ def generate_candidate_routes_for_rep(df_rep: pd.DataFrame, matrix_data: dict[st
     min_clients = int(config["daily_route"]["min_clients"])
     max_clients = int(config["daily_route"]["max_clients"])
     raw: list[dict[str, Any]] = []
+
+    # 0. Periodic seed routes. These are still route-first candidates, but they
+    # provide a frequency-feasible exact-cover backbone for the master solver.
+    _add_periodic_seed_candidates(raw, df_rep, matrix_data, config)
 
     # 1. Cluster routes.
     for _, cluster_df in df_rep.groupby("cluster_id"):
@@ -304,7 +417,7 @@ def generate_candidate_routes_for_rep(df_rep: pd.DataFrame, matrix_data: dict[st
     keep_top = int(config["candidate_routes"].get("keep_top_n_per_rep", requested))
     candidates["selection_score"] = _selection_score(candidates)
     candidate_pool = candidates.copy()
-    essential = candidates[candidates["generation_method"].isin(["cluster", "coverage_repair"])].copy()
+    essential = candidates[candidates["generation_method"].isin(["periodic_seed", "cluster", "coverage_repair"])].copy()
     top = candidates.nsmallest(keep_top, "selection_score").copy()
     candidates = pd.concat([top, essential], ignore_index=True)
     candidates["set_key"] = candidates["client_ids"].map(_client_set_key)

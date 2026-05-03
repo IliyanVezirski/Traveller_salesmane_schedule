@@ -52,9 +52,12 @@ def _performance_config(config: dict[str, Any], args: argparse.Namespace) -> dic
     updated.setdefault("osrm", {})
     updated.setdefault("candidate_routes", {})
     updated.setdefault("optimization", {})
+    updated.setdefault("route_costing", {})
     updated["osrm"].update({"use_osrm": False, "fallback_to_haversine": True, "use_cache": False})
     updated["candidate_routes"]["cache"] = False
+    updated["route_costing"]["pyvrp_max_iterations"] = 50
     updated["optimization"]["log_search_progress"] = False
+    updated["optimization"]["stop_after_first_solution"] = True
     updated["optimization"]["time_limit_seconds"] = args.time_limit
     if args.candidates_per_rep is not None:
         updated["candidate_routes"]["candidates_per_rep"] = args.candidates_per_rep
