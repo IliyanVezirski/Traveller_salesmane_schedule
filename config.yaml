@@ -1,0 +1,64 @@
+working_days:
+  weeks: 4
+  weekdays:
+    - Monday
+    - Tuesday
+    - Wednesday
+    - Thursday
+    - Friday
+
+daily_route:
+  target_clients: 20
+  min_clients: 17
+  max_clients: 22
+  allow_underfilled: true
+  allow_overfilled: false
+
+candidate_routes:
+  candidates_per_rep: 3000
+  random_seed: 42
+  generation_methods:
+    - cluster
+    - cluster_neighbors
+    - sweep
+    - nearest_neighbor_expansion
+    - randomized_compact
+  remove_duplicates: true
+  keep_top_n_per_rep: 3000
+  cache: true
+  max_route_km_median_multiplier: 2.8
+
+osrm:
+  url: "http://localhost:5000"
+  use_osrm: true
+  use_cache: true
+  fallback_to_haversine: true
+  request_timeout_seconds: 30
+
+route_costing:
+  method: "nearest_neighbor_2opt"
+  final_method: "pyvrp"
+  pyvrp_time_limit_seconds: 3
+  route_type: "open"
+  use_duration_if_available: true
+
+optimization:
+  solver: "ortools_cpsat"
+  time_limit_seconds: 3600
+  num_workers: 8
+  log_search_progress: true
+
+weights:
+  route_km: 1000
+  underfilled_route: 500
+  over_target_clients: 300
+  bad_spacing_frequency_8: 2000
+  bad_spacing_frequency_2: 2000
+  cluster_mixing: 300
+  unused_day: 100
+  fixed_weekday_violation: 5000
+  preferred_weekday_violation: 500
+
+output:
+  excel_path: "output/final_schedule.xlsx"
+  map_path: "output/maps/final_schedule_map.html"

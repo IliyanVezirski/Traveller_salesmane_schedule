@@ -1,0 +1,25 @@
+# QA Checklist
+
+- [x] `python -c "from src.pipeline import run_pipeline"`
+- [x] `python -c "from src.data_loader import load_clients"`
+- [x] `python -c "from src.validation import validate_clients"`
+- [x] `python main.py` works through the documented smoke arguments
+- [x] `python run_gui.py` launch path import-checks without exception
+- [x] `python scripts/check_gui_import.py`
+- [x] `sample_clients.xlsx` exists
+- [x] `input_clients_template.xlsx` exists
+- [x] `final_schedule.xlsx` generated
+- [x] required Excel sheets exist
+- [x] PyVRP final routing is used when configured
+- [x] `final_route_method` is exported to Excel
+- [x] frequency 2 validation passes
+- [x] frequency 4 validation passes
+- [x] frequency 8 validation passes
+- [x] GUI calls `run_pipeline`
+- [x] OSRM fallback works
+- [x] errors are user-friendly through contract `status/message` and GUI failure handling
+- [x] README commands are correct
+- [x] pytest suite exists and passes
+- [x] smoke test script exists and passes
+- [x] release smoke test exists and passes
+- [x] independent result audit has no hard failures

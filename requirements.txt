@@ -1,0 +1,9 @@
+pandas
+numpy
+openpyxl
+scikit-learn
+ortools
+requests
+pyyaml
+folium
+tqdm

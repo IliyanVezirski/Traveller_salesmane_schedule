@@ -1,0 +1,3 @@
+# Optional VRP solver package. The current packaged app can run without this
+# because final routing uses nearest_neighbor_2opt fallback logic.
+pyvrp
