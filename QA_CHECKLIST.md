@@ -23,3 +23,12 @@
 - [x] smoke test script exists and passes
 - [x] release smoke test exists and passes
 - [x] independent result audit has no hard failures
+- [x] commit `0ebde1e` is present locally and matches `origin/main`
+- [x] `periodic_seed` route-first candidates exist
+- [x] `min_candidates_per_client: 6` coverage top-up exists
+- [x] master solver remains route-first with `z[candidate_route, day]`
+- [x] master solver prefers lower `route_km` when candidates are otherwise equivalent
+- [x] master solver chooses the lower total objective when route penalties outweigh raw distance
+- [x] 1800 performance run succeeds in a fresh output folder
+- [x] 1800 schedule has 6600 planned visits
+- [x] 1800 candidate coverage is 1800 OK

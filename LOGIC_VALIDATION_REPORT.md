@@ -27,6 +27,7 @@ Executed in the latest validation pass:
 
 - `python -m pytest` -> 17 passed.
 - `python scripts/run_logic_validation.py --input data/synthetic_small_feasible.xlsx --time-limit 60 --candidates-per-rep 500` -> PASS.
+- `python scripts/run_logic_validation.py --input data/synthetic_medium_feasible.xlsx --time-limit 120 --candidates-per-rep 500` -> PARTIAL, 0 hard errors and 26 route-density warnings.
 - `python scripts/run_logic_validation.py --input data/synthetic_infeasible_capacity.xlsx` -> expected FAIL at input validation, 19 errors.
 - `python scripts/run_logic_validation.py --input data/synthetic_bad_coordinates.xlsx` -> expected FAIL at input validation, 9 errors.
 - `python scripts/run_performance_test_1800.py` -> PASS / feasible schedule generated.
@@ -58,7 +59,7 @@ Implemented as FAIL for missing, negative, or internally inconsistent `route_km_
 
 Small end-to-end run:
 
-- Total route km: 119.7.
+- Total route km: 102.0.
 - Selected route km min/median/max: 5.1 / 7.7 / 9.4.
 
 ## Performance Results
@@ -78,12 +79,12 @@ Latest result:
 
 - Status: SUCCESS.
 - Solver status: FEASIBLE.
-- Validation stage: 0.20s.
-- Matrix building: 0.05s.
-- Candidate generation: 262.62s.
-- Master solving: 323.04s.
-- Final routing: 2.71s.
-- Export: 1.92s.
+- Validation stage: 0.24s.
+- Matrix building: 0.06s.
+- Candidate generation: 266.86s.
+- Master solving: 318.19s.
+- Final routing: 2.59s.
+- Export: 1.90s.
 - Routes: 360.
 - Planned visits: 6600.
 - Required visits: 6600.

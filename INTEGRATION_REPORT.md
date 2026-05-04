@@ -4,60 +4,134 @@
 
 PASS
 
-The latest Backend Optimization Agent change was validated end-to-end. The project still uses the route-first master model with `z[candidate_route, day]`; the new PyVRP final-routing path is integrated through the existing pipeline, exported to Excel, and covered by tests.
+Commit `0ebde1e Fix route-first 1800-client feasibility` is present locally and matches `origin/main`. The fix is validated: route-first architecture is preserved, the small feasible logic run passes, and the 1800-client performance run produces a feasible audited schedule.
 
-One independent audit run reports `PARTIAL` only because the smoke config intentionally allows tiny/underfilled routes for fast QA. Hard correctness checks pass: frequency rules, duplicate visits, sales rep consistency, one route per rep/day, route_km, coverage, and summary consistency.
+## Git verification
+
+```bash
+git fetch origin
+git rev-parse HEAD
+git status --short --branch
+git show --stat --oneline --decorate HEAD
+```
+
+Result:
+
+- HEAD: `0ebde1ea31ad9f9b9d783df81747921de2a890e6`
+- Branch: `main...origin/main`
+- Commit: `0ebde1e (HEAD -> main, origin/main) Fix route-first 1800-client feasibility`
+- Working tree before report edits: clean
+
+## Architecture checks
+
+Verified in code:
+
+- `src/candidate_routes.py` adds `periodic_seed` route-first candidates.
+- `src/candidate_routes.py` keeps route candidates with calculated `route_km`; no client-day scheduler replacement was introduced.
+- `candidate_routes.min_candidates_per_client: 6` is present in config/defaults.
+- Post-pruning coverage top-up is implemented.
+- `src/pvrp_master_solver.py` still creates `z[candidate_route, day]` decision variables.
+- Solver decomposition is by independent `sales_rep` subproblem.
+- No `x[client, day]` architecture was introduced.
 
 ## Commands run
 
 ```bash
-python -c "from src.pipeline import run_pipeline; import inspect; print(inspect.signature(run_pipeline))"
-python -c "from src.data_loader import load_clients; from src.validation import validate_clients; print('core imports ok')"
-python -c "from src.final_routing import optimize_selected_daily_routes; print('final_routing import ok')"
-python -c "import pandas, numpy, openpyxl, sklearn, ortools, requests, yaml, folium, tqdm; print('base deps ok')"
-python -c "import pyvrp; print('pyvrp ok')"
-python -c "import PySide6; import run_gui; from gui.main_window import MainWindow; print('gui imports ok')"
-python -c "import yaml; data=yaml.safe_load(open('config.yaml', encoding='utf-8')); required={'working_days','daily_route','candidate_routes','osrm','route_costing','optimization','weights','output'}; print('missing', sorted(required-set(data)))"
-python -c "import yaml; from src.data_loader import load_clients; from src.validation import validate_clients; from src.osrm_matrix import build_distance_matrix_for_rep; cfg=yaml.safe_load(open('config.yaml', encoding='utf-8')); cfg['osrm'].update({'use_osrm': True, 'fallback_to_haversine': True, 'use_cache': False, 'url': 'http://127.0.0.1:9', 'request_timeout_seconds': 1}); df,_=validate_clients(load_clients('data/sample_clients.xlsx'), cfg); _,rep=next(iter(df.groupby('sales_rep'))); m=build_distance_matrix_for_rep(rep, cfg, 'cache/osrm_matrices'); print(m['source'], m['distance_matrix_m'].shape)"
-python main.py --help
 python -m pytest tests
-python scripts/smoke_test.py
-python main.py --input data/sample_clients.xlsx --output output/final_cli_validation --no-osrm --no-cache --quiet-solver --time-limit 20 --num-workers 4 --target-clients 6 --min-clients 1 --max-clients 8 --candidates-per-rep 250 --keep-top-n-per-rep 250
-python scripts/check_gui_import.py
-python scripts/run_logic_validation.py --input data/sample_clients.xlsx --audit-only-final-schedule output/final_cli_validation/final_schedule.xlsx --output-dir output/final_logic_validation --target-clients 6 --min-clients 1 --max-clients 8
-python -m compileall src gui scripts main.py run_gui.py
-python scripts/release_smoke_test.py
+python -m pytest tests\test_master_solver_objective.py -q
+python scripts/run_logic_validation.py --input data\synthetic_small_feasible.xlsx --time-limit 60 --candidates-per-rep 500
+python scripts/run_performance_test_1800.py
+python scripts/run_performance_test_1800.py --output-dir output\final_performance_validation
 ```
 
-## Verified results
+Additional direct 1800 workbook checks:
 
-- Imports: PASS
-- Base dependencies: PASS
-- GUI imports: PASS
-- PyVRP import: PASS
-- Config sections: PASS
-- OSRM fallback: PASS, source returned `haversine`
-- Pytest: PASS, `17 passed`
-- Pipeline smoke: PASS, `status=success`
-- CLI smoke: PASS, `status=success`
-- Release smoke: PASS, `status=success`
-- Compile check: PASS
-- Independent result audit: PARTIAL with warnings only, no hard failures
+```bash
+python -c "import openpyxl, pandas as pd; p='output/final_performance_validation/performance_1800_run/final_schedule.xlsx'; wb=openpyxl.load_workbook(p, read_only=True, data_only=True); print(wb.sheetnames); df=pd.read_excel(p, sheet_name='Final_Schedule'); print(df.shape); print(df['final_route_method'].value_counts(dropna=False).to_dict())"
+python -c "import pandas as pd; p='output/final_performance_validation/performance_1800_run/final_schedule.xlsx'; df=pd.read_excel(p, sheet_name='Final_Schedule'); print((df[df.visit_frequency.eq(2)].groupby('client_id').size()==2).all())"
+```
 
-## Backend change validation
+## Test results
 
-- `route_costing.final_method: "pyvrp"` is now implemented for open final routes.
-- `tests/test_final_routing_pyvrp.py` passes and confirms PyVRP is selected when configured.
-- End-to-end Excel output from `output/final_cli_validation/final_schedule.xlsx` has `final_route_method = pyvrp` for all 136 scheduled stop rows.
-- `route_km_total` is populated for every scheduled stop.
-- The backend falls back to `nearest_neighbor_2opt` in code when PyVRP is unavailable or cannot solve a final route.
-
-## Excel/output checks
-
-Validated workbook:
+### Pytest
 
 ```text
-output/final_cli_validation/final_schedule.xlsx
+19 passed
+```
+
+Added targeted objective tests:
+
+- `test_master_solver_prefers_lower_route_km_when_candidates_are_equivalent`
+- `test_master_solver_uses_total_objective_not_route_km_alone`
+
+Targeted run:
+
+```text
+2 passed
+```
+
+### Small logic validation
+
+Command:
+
+```bash
+python scripts/run_logic_validation.py --input data\synthetic_small_feasible.xlsx --time-limit 60 --candidates-per-rep 500
+```
+
+Result:
+
+- Overall status: `PASS`
+- Solver status: `OPTIMAL`
+- Generated candidates: `1,010`
+- Routes: `16`
+- Planned visits: `320`
+- Validation errors: `0`
+- Output: `output/logic_validation/synthetic_small_feasible/final_schedule.xlsx`
+
+### 1800 performance validation
+
+The first run to the default existing output path reached export but failed with:
+
+```text
+PermissionError(13, 'Permission denied')
+```
+
+This happened while overwriting the existing workbook at `output/logic_validation/performance_1800_run/final_schedule.xlsx`. A fresh output directory was then used to isolate solver correctness from file-lock/overwrite risk.
+
+Command:
+
+```bash
+python scripts/run_performance_test_1800.py --output-dir output\final_performance_validation
+```
+
+Result:
+
+- Performance status: `success`
+- Solver status: `FEASIBLE`
+- Routes: `360`
+- Planned visits: `6600`
+- Candidate coverage: `1800 OK`
+- Audit status: `WARNING`
+- Audit passed: `True`
+- Audit errors: `0`
+- Audit warnings: `134` route-density quality warnings
+- Output: `output/final_performance_validation/performance_1800_run/final_schedule.xlsx`
+
+Stage timings:
+
+- validation: `0.23s`
+- matrix_building: `0.06s`
+- candidate_generation: `270.04s`
+- master_solving: `343.53s`
+- final_routing: `2.80s`
+- export: `2.10s`
+
+## 1800 Excel validation
+
+Workbook:
+
+```text
+output/final_performance_validation/performance_1800_run/final_schedule.xlsx
 ```
 
 Required sheets found:
@@ -71,48 +145,54 @@ Required sheets found:
 - `Candidate_Coverage`
 - `Parameters`
 
-Schedule checks:
+Direct checks:
 
-- frequency 2 clients have exactly 2 visits: PASS
-- frequency 4 clients have exactly 1 visit per week: PASS
-- frequency 8 clients have exactly 2 visits per week: PASS
-- duplicate client-day visits: 0
-- max routes per sales rep/day: 1
-- missing route_km rows: 0
-- `final_route_method` exported: PASS
+- Final schedule rows: `6600`
+- `final_route_method`: `{'pyvrp': 6600}`
+- Missing `route_km_total`: `0`
+- Duplicate client/day visits: `0`
+- Frequency 2 exactly 2 visits: `PASS`
+- Frequency 4 exactly 1 visit per week: `PASS`
+- Frequency 8 exactly 2 visits per week: `PASS`
+- Max selected routes per sales rep/day: `1`
+- Candidate coverage severity: `{'OK': 1800}`
+- Minimum candidate coverage: `6`
+- Clients below recommended candidate coverage: `0`
 
-## Fixed issues in this pass
+## Fixed issues validated
 
-- README installation instructions now document split dependency files:
-  - `requirements.txt` for core CLI/runtime
-  - `requirements-gui.txt` for GUI
-  - `requirements-optional.txt` for PyVRP
-  - `requirements-dev.txt` plus optional dependencies for full QA/dev
-- QA checklist updated for PyVRP final routing, release smoke, and independent audit checks.
+- Completed: route-first exact-cover backbone via `periodic_seed` candidates.
+- Completed: post-pruning top-up to minimum candidate coverage.
+- Completed: decomposed CP-SAT by sales rep while preserving route-first `z[candidate_route, day]`.
+- Completed: first feasible performance mode for 1800 runner.
+- Completed: PyVRP iteration-limited performance final routing; fresh run final routing took `2.80s`.
+- Completed: deterministic master-solver objective tests now verify that route distance affects candidate selection and that configured penalties participate in the total objective.
 
 ## Remaining backend issues
 
-- No blocking backend issue found in the PyVRP integration.
-- Smoke/runtime note: with PyVRP enabled, the end-to-end smoke run takes around 110-116 seconds on this machine. If this is too slow for CI, consider a dedicated smoke config with a lower `route_costing.pyvrp_time_limit_seconds` or a targeted PyVRP unit test plus a nearest-neighbor E2E smoke.
+- No correctness blocker found.
+- Route-density warnings remain quality-only: `134` warnings, `0` audit errors.
+- The 1800 run is still heavy overall: about `10m 17s` measured across candidate generation and master solving on this machine.
+
+## Remaining integration issues
+
+- The first 1800 run failed at export because the default existing workbook path was not writable. This is consistent with a locked/open Excel file or overwrite permission issue. It did not indicate solver failure.
+- Recommendation: performance/release scripts should write to a fresh timestamped run folder or handle locked output workbooks with a clearer message and alternate filename.
 
 ## Remaining GUI issues
 
-- GUI import and worker contract checks pass.
-- Full manual GUI click-through was not performed because starting the interactive event loop would block the automated QA run.
+- No GUI changes required for this backend fix.
 
-## Output files generated
+## Output files generated/validated
 
-- `output/smoke_test/final_schedule.xlsx`
-- `output/smoke_test/maps/final_schedule_map.html`
-- `output/final_cli_validation/final_schedule.xlsx`
-- `output/final_cli_validation/maps/final_schedule_map.html`
-- `output/release_smoke_test/final_schedule.xlsx`
-- `output/release_smoke_test/maps/final_schedule_map.html`
-- `output/final_logic_validation/sample_clients_logic_validation_result.json`
-- `output/final_logic_validation/sample_clients_logic_validation_result.md`
+- `output/logic_validation/synthetic_small_feasible/final_schedule.xlsx`
+- `output/final_performance_validation/performance_1800_report.json`
+- `output/final_performance_validation/performance_1800_report.md`
+- `output/final_performance_validation/performance_1800_run/final_schedule.xlsx`
 
 ## Recommendations
 
-- Keep `python -m pytest tests` as the fast regression gate.
-- Keep `python scripts/smoke_test.py` or `python scripts/release_smoke_test.py` as the end-to-end gate before releases.
-- For CI speed, add a separate very-small final-routing fixture that exercises PyVRP without solving a full monthly sample.
+- Accept the backend fix as correct for feasibility and hard constraints.
+- Keep `python -m pytest tests` and the small logic validation as routine gates.
+- Run the 1800 performance test before release builds, preferably with a unique output directory.
+- Treat route-density warnings as quality optimization work for Backend Optimization Agent, not an integration blocker.
