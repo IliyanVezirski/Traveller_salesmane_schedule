@@ -54,6 +54,7 @@ class ParameterPanel(QWidget):
         self.target_clients = self._spin(1, 200)
         self.min_clients = self._spin(1, 200)
         self.max_clients = self._spin(1, 200)
+        self.compactness_strength = self._double_spin(0.25, 4.0, decimals=2, single_step=0.25)
 
         self.candidates_per_rep = self._spin(1, 500_000)
         self.random_seed = self._spin(0, 999_999)
@@ -84,6 +85,7 @@ class ParameterPanel(QWidget):
         content_layout = QVBoxLayout(content)
         content_layout.addWidget(self._calendar_group())
         content_layout.addWidget(self._daily_route_group())
+        content_layout.addWidget(self._selective_routing_group())
         content_layout.addWidget(self._candidate_group())
         content_layout.addWidget(self._osrm_group())
         content_layout.addWidget(self._optimization_group())
@@ -115,6 +117,7 @@ class ParameterPanel(QWidget):
         self.target_clients.setValue(int(_get(config, ("daily_route", "target_clients"), 20)))
         self.min_clients.setValue(int(_get(config, ("daily_route", "min_clients"), 17)))
         self.max_clients.setValue(int(_get(config, ("daily_route", "max_clients"), 22)))
+        self.compactness_strength.setValue(float(_get(config, ("selective_day_routing", "compactness_strength"), 1.0)))
 
         self.candidates_per_rep.setValue(int(_get(config, ("candidate_routes", "candidates_per_rep"), 3000)))
         self.random_seed.setValue(int(_get(config, ("candidate_routes", "random_seed"), 42)))
@@ -147,6 +150,9 @@ class ParameterPanel(QWidget):
         daily["target_clients"] = self.target_clients.value()
         daily["min_clients"] = self.min_clients.value()
         daily["max_clients"] = self.max_clients.value()
+
+        selective = _ensure(config, ("selective_day_routing",))
+        selective["compactness_strength"] = self.compactness_strength.value()
 
         candidate = _ensure(config, ("candidate_routes",))
         candidate["candidates_per_rep"] = self.candidates_per_rep.value()
@@ -206,6 +212,13 @@ class ParameterPanel(QWidget):
         form.addRow("", self.remove_duplicates)
         return group
 
+    def _selective_routing_group(self) -> QGroupBox:
+        group = QGroupBox("Selective day routing")
+        form = QFormLayout(group)
+        form.addRow("compactness_strength:", self.compactness_strength)
+        form.addRow(QLabel("1.0 = current, higher = tighter geography, lower = more flexible"))
+        return group
+
     def _osrm_group(self) -> QGroupBox:
         group = QGroupBox("OSRM")
         form = QFormLayout(group)
@@ -241,9 +254,9 @@ class ParameterPanel(QWidget):
         return spin
 
     @staticmethod
-    def _double_spin(minimum: float, maximum: float) -> QDoubleSpinBox:
+    def _double_spin(minimum: float, maximum: float, *, decimals: int = 0, single_step: float = 100) -> QDoubleSpinBox:
         spin = QDoubleSpinBox()
         spin.setRange(minimum, maximum)
-        spin.setDecimals(0)
-        spin.setSingleStep(100)
+        spin.setDecimals(decimals)
+        spin.setSingleStep(single_step)
         return spin

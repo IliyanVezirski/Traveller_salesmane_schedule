@@ -13,17 +13,17 @@ import pandas as pd
 
 from .app_paths import ensure_runtime_dirs, get_cache_dir, get_project_root, get_output_dir
 from .calendar_builder import build_calendar
-from .candidate_routes import generate_candidate_routes_for_rep
-from .clustering import cluster_clients
+from .clustering import assign_global_weekday_territories, cluster_clients
 from .data_loader import load_clients
+from .day_pattern_solver import solve_day_pattern_master
 from .export_excel import export_schedule_excel
 from .final_routing import optimize_selected_daily_routes
 from .logging_utils import setup_run_logger
 from .local_search import improve_solution
 from .map_visualization import generate_schedule_map
 from .osrm_matrix import build_distance_matrix_for_rep
-from .pvrp_master_solver import solve_pvrp_master
 from .scoring import score_solution, validate_solution
+from .selective_day_scheduler import solve_selective_day_schedule
 from .validation import validate_clients
 from .version import APP_BUILD, APP_NAME, APP_VERSION
 
@@ -37,6 +37,33 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "working_days": {
         "weeks": 4,
         "weekdays": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+    },
+    "weekday_consistency": {
+        "frequency_2_same_weekday": True,
+        "frequency_4_same_weekday": True,
+        "frequency_8_same_weekday_pair": True,
+    },
+    "clustering": {
+        "use_distance_matrix": True,
+        "k_medoids_max_iterations": 30,
+        "target_cluster_size": 4,
+        "max_clusters_per_rep": 60,
+    },
+    "territory_days": {
+        "enabled": True,
+        "hard_client_weekday": False,
+        "scope": "per_rep",
+        "use_distance_matrix": True,
+        "max_daily_territory_km": 75,
+        "route_span_weight": 25,
+        "route_span_over_limit_weight": 5000,
+        "load_balance_weight": 250,
+        "overload_weight": 1000000,
+        "local_refinement_iterations": 25,
+    },
+    "global_geography": {
+        "enabled": True,
+        "global_cluster_count": 30,
     },
     "daily_route": {
         "target_clients": 20,
@@ -61,6 +88,29 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "min_candidates_per_client": 6,
         "cache": True,
         "max_route_km_median_multiplier": 2.8,
+    },
+    "selective_day_routing": {
+        "enabled": True,
+        "compactness_strength": 1.0,
+        "pool_size": 45,
+        "prize_base": 100000,
+        "urgency_bonus": 5000,
+        "territory_bonus": 2000,
+        "territory_mismatch_penalty": 40000,
+        "preferred_bonus": 1000,
+        "distance_penalty": 2000,
+        "freq4_weekday_balance_weight": 50000,
+        "freq4_territory_mismatch_penalty": 2000,
+        "freq4_weekday_overload_penalty": 1000000,
+        "freq4_weekday_capacity_ratio": 0.85,
+        "frequency2_ideal_gap_days": 10,
+        "frequency2_close_gap_penalty": 1500,
+        "frequency2_spacing_bonus": 200,
+        "frequency2_weekday_balance_weight": 5000,
+        "frequency2_weekday_overload_penalty": 1000000,
+        "frequency2_phase_spacing_weight": 1000,
+        "pyvrp_time_limit_seconds": 2,
+        "pyvrp_max_iterations": 500,
     },
     "osrm": {
         "url": "http://localhost:5000",
@@ -411,12 +461,19 @@ def _run_pipeline_impl(
         _check_cancel(cancel_checker)
         _emit_progress(progress_callback, 13, "Създаване на календар")
         calendar_df = build_calendar(runtime_config)
+        planning_clients_df = clients_df
+        global_geography_enabled = bool(runtime_config.get("global_geography", {}).get("enabled", False))
+        global_planning_enabled = str(runtime_config.get("territory_days", {}).get("scope", "per_rep")).lower() == "global"
+        if global_geography_enabled or global_planning_enabled:
+            planning_clients_df = assign_global_weekday_territories(clients_df, runtime_config)
+            _emit_log(
+                log_callback,
+                f"Assigned global weekday territories across {planning_clients_df['client_id'].nunique()} clients.",
+            )
         matrix_data_by_rep: dict[str, dict[str, Any]] = {}
         clustered_reps: list[pd.DataFrame] = []
-        candidates: list[pd.DataFrame] = []
-        coverage: list[pd.DataFrame] = []
 
-        rep_groups = list(clients_df.groupby("sales_rep"))
+        rep_groups = list(planning_clients_df.groupby("sales_rep"))
         total_reps = max(1, len(rep_groups))
         for rep_index, (sales_rep, rep_df) in enumerate(rep_groups, start=1):
             base = 15 + int((rep_index - 1) * 45 / total_reps)
@@ -432,30 +489,27 @@ def _run_pipeline_impl(
 
             _check_cancel(cancel_checker)
             _emit_progress(progress_callback, base + 6, f"Клъстериране на клиенти: {rep_label}")
-            clustered = cluster_clients(rep_df, matrix_data["distance_matrix_m"], runtime_config)
+            clustered = cluster_clients(rep_df, matrix_data["distance_matrix_m"], runtime_config, matrix_data.get("client_ids"))
             clustered_reps.append(clustered)
 
             _check_cancel(cancel_checker)
             _emit_progress(progress_callback, base + 12, f"Генериране на кандидат-маршрути: {rep_label}")
-            _emit_log(log_callback, f"[{rep_label}] Generating candidate routes")
-            rep_candidates, rep_coverage = generate_candidate_routes_for_rep(clustered, matrix_data, runtime_config)
-            _emit_log(log_callback, f"[{rep_label}] Candidate routes: {len(rep_candidates):,}")
-            candidates.append(rep_candidates)
-            coverage.append(rep_coverage)
+            _emit_log(log_callback, f"[{rep_label}] Prepared client-day pattern inputs")
 
         _check_cancel(cancel_checker)
         _emit_progress(progress_callback, 62, "Изчисляване на route costs")
         clients_clustered = pd.concat(clustered_reps, ignore_index=True)
-        candidates_df = pd.concat(candidates, ignore_index=True)
-        coverage_df = pd.concat(coverage, ignore_index=True)
         _emit_log(
             log_callback,
-            f"Generated {len(candidates_df):,} candidate routes across {clients_clustered['sales_rep'].nunique()} sales reps.",
+            f"Prepared client-day pattern model across {clients_clustered['sales_rep'].nunique()} sales reps.",
         )
 
         _check_cancel(cancel_checker)
         _emit_progress(progress_callback, 70, "Решаване на PVRP master модела")
-        solver_result = solve_pvrp_master(clients_clustered, calendar_df, candidates_df, runtime_config)
+        if bool(runtime_config.get("selective_day_routing", {}).get("enabled", True)):
+            solver_result = solve_selective_day_schedule(clients_clustered, calendar_df, matrix_data_by_rep, runtime_config)
+        else:
+            solver_result = solve_day_pattern_master(clients_clustered, calendar_df, runtime_config)
         solver_status = str(solver_result["status"])
         _emit_log(log_callback, f"Solver status: {solver_status}; wall_time={solver_result['solver_wall_time']:.2f}s")
         if solver_result["selected_candidates"].empty:
@@ -464,7 +518,7 @@ def _run_pipeline_impl(
             return {
                 "status": "infeasible",
                 "solver_status": solver_status,
-                "message": "No feasible route-first PVRP solution found.",
+                "message": "No feasible client-day schedule found.",
                 "validation": input_validation,
                 "excel_path": None,
                 "map_path": None,
@@ -474,11 +528,12 @@ def _run_pipeline_impl(
                 "planned_visits": 0,
                 "warnings": solver_result.get("warnings", []),
             }
+        coverage_df = solver_result.get("coverage", pd.DataFrame())
 
         _check_cancel(cancel_checker)
         _emit_progress(progress_callback, 82, "Финално подреждане на маршрути")
         selected_candidates = improve_solution(
-            solver_result["selected_candidates"], candidates_df, clients_clustered, calendar_df, runtime_config
+            solver_result["selected_candidates"], pd.DataFrame(), clients_clustered, calendar_df, runtime_config
         )
         final_routes = optimize_selected_daily_routes(selected_candidates, clients_clustered, matrix_data_by_rep, runtime_config)
 

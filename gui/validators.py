@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 
-REQUIRED_COLUMNS = ["client_id", "client_name", "sales_rep", "lat", "lon", "visit_frequency"]
+REQUIRED_COLUMNS = ["client_id", "client_name", "sales_rep", "gps", "visit_frequency"]
 
 
 def validate_excel_file(path: str) -> list[str]:
@@ -74,4 +74,6 @@ def validate_output_dir(path: str) -> list[str]:
 
 
 def format_missing_column_message(column: str) -> str:
+    if column in {"lat", "lon", "gps"}:
+        return "Missing coordinates: add a gps column like 42.69804,23.31229 or keep the old lat/lon columns."
     return f"Липсва задължителна колона: {column}"

@@ -144,3 +144,113 @@ def test_master_solver_uses_total_objective_not_route_km_alone() -> None:
     assert result["status"] == "OPTIMAL"
     assert _selected_ids(result) == {"longer_but_compact"}
     assert result["selected_candidates"]["route_km"].eq(5.0).all()
+
+
+def _single_client_config() -> dict:
+    return _config(
+        {
+            "route_km": 1,
+            "underfilled_route": 0,
+            "over_target_clients": 0,
+            "bad_spacing_frequency_8": 0,
+            "bad_spacing_frequency_2": 0,
+            "cluster_mixing": 0,
+            "fixed_weekday_violation": 0,
+            "preferred_weekday_violation": 0,
+        }
+    ) | {"weekday_consistency": {"frequency_4_same_weekday": True}}
+
+
+def _single_client(freq: int = 4, fixed_weekday: str | None = None) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "client_id": "C1",
+                "client_name": "Client 1",
+                "sales_rep": "Rep A",
+                "lat": 42.70,
+                "lon": 23.32,
+                "visit_frequency": freq,
+                "fixed_weekday": fixed_weekday if fixed_weekday is not None else pd.NA,
+                "forbidden_weekdays": pd.NA,
+                "preferred_weekdays": pd.NA,
+            }
+        ]
+    )
+
+
+def _single_client_candidate() -> pd.DataFrame:
+    candidate = _candidate("single_client_route", route_km=1.0)
+    candidate["client_ids"] = ["C1"]
+    candidate["number_of_clients"] = 1
+    return pd.DataFrame([candidate])
+
+
+def test_frequency_4_uses_same_weekday_across_all_weeks() -> None:
+    result = solve_pvrp_master(_single_client(), _calendar(), _single_client_candidate(), _single_client_config())
+
+    assert result["status"] == "OPTIMAL"
+    selected = result["selected_candidates"]
+    assert len(selected) == 4
+    assert selected["week_index"].nunique() == 4
+    assert selected["weekday"].nunique() == 1
+
+
+def test_fixed_weekday_is_a_hard_constraint() -> None:
+    result = solve_pvrp_master(_single_client(fixed_weekday="Friday"), _calendar(), _single_client_candidate(), _single_client_config())
+
+    assert result["status"] == "OPTIMAL"
+    selected = result["selected_candidates"]
+    assert len(selected) == 4
+    assert set(selected["weekday"]) == {"Friday"}
+
+
+def test_territory_weekday_is_strongly_preferred() -> None:
+    config = _single_client_config()
+    config["weights"]["territory_weekday_violation"] = 200_000
+    candidate = _single_client_candidate()
+    candidate["territory_weekday_index"] = 0
+    candidate["territory_mixing_penalty"] = 0
+
+    result = solve_pvrp_master(_single_client(), _calendar(), candidate, config)
+
+    assert result["status"] == "OPTIMAL"
+    selected = result["selected_candidates"]
+    assert len(selected) == 4
+    assert set(selected["weekday"]) == {"Monday"}
+
+
+def test_client_territory_weekday_is_strongly_preferred() -> None:
+    config = _single_client_config()
+    config["weights"]["territory_client_weekday_violation"] = 200_000
+    client = _single_client()
+    client["territory_weekday_index"] = 2
+    client["territory_weekday"] = "Wednesday"
+
+    result = solve_pvrp_master(client, _calendar(), _single_client_candidate(), config)
+
+    assert result["status"] == "OPTIMAL"
+    selected = result["selected_candidates"]
+    assert len(selected) == 4
+    assert set(selected["weekday"]) == {"Wednesday"}
+
+
+def test_solver_falls_back_to_periodic_seed_when_cp_sat_finds_no_solution() -> None:
+    config = _single_client_config()
+    config["optimization"]["time_limit_seconds"] = 0.0
+    seed_candidates = []
+    for day in [0, 5, 10, 15]:
+        candidate = _candidate(f"seed_{day}", route_km=1.0)
+        candidate["client_ids"] = ["C1"]
+        candidate["number_of_clients"] = 1
+        candidate["generation_method"] = "periodic_seed"
+        candidate["intended_day_index"] = day
+        seed_candidates.append(candidate)
+
+    result = solve_pvrp_master(_single_client(), _calendar(), pd.DataFrame(seed_candidates), config)
+
+    assert result["status"] == "FEASIBLE_SEED"
+    selected = result["selected_candidates"]
+    assert len(selected) == 4
+    assert set(selected["day_index"]) == {0, 5, 10, 15}
+    assert set(selected["weekday"]) == {"Monday"}

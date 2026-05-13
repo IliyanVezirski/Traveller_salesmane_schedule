@@ -17,6 +17,7 @@ def validate_solution(daily_routes_df: pd.DataFrame, clients_df: pd.DataFrame, s
     if daily_routes_df.empty:
         return pd.DataFrame([_validation_issue("ERROR", None, None, "No daily routes were produced.")])
 
+    consistency = config.get("weekday_consistency", {})
     for client in clients_df.itertuples(index=False):
         visits = daily_routes_df[daily_routes_df["client_id"].astype(str).eq(str(client.client_id))]
         freq = int(client.visit_frequency)
@@ -37,6 +38,34 @@ def validate_solution(daily_routes_df: pd.DataFrame, clients_df: pd.DataFrame, s
             issues.append(_validation_issue("ERROR", client.sales_rep, client.client_id, "Client is visited more than once on a day."))
         if not visits.empty and not visits["sales_rep"].eq(client.sales_rep).all():
             issues.append(_validation_issue("ERROR", client.sales_rep, client.client_id, "Client assigned to wrong sales_rep."))
+        if not visits.empty and "weekday" in visits.columns:
+            if freq in {2, 4} and bool(consistency.get(f"frequency_{freq}_same_weekday", True)):
+                weekdays = sorted(set(visits["weekday"].astype(str)))
+                if len(weekdays) > 1:
+                    issues.append(
+                        _validation_issue(
+                            "ERROR",
+                            client.sales_rep,
+                            client.client_id,
+                            f"Client weekday moved between visits: {', '.join(weekdays)}.",
+                        )
+                    )
+            if freq == 8 and bool(consistency.get("frequency_8_same_weekday_pair", True)):
+                weekly_patterns = {
+                    int(week): tuple(sorted(set(group["weekday"].astype(str))))
+                    for week, group in visits.groupby("week_index")
+                    if len(group) == 2
+                }
+                distinct_patterns = sorted(set(weekly_patterns.values()))
+                if len(distinct_patterns) > 1:
+                    issues.append(
+                        _validation_issue(
+                            "ERROR",
+                            client.sales_rep,
+                            client.client_id,
+                            "Client weekday pair moved between weeks.",
+                        )
+                    )
 
     routes_per_rep_day = selected_candidates_df.groupby(["sales_rep", "day_index"]).size()
     for (sales_rep, day), count in routes_per_rep_day.items():

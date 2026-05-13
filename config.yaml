@@ -1,69 +1,111 @@
 working_days:
   weeks: 4
   weekdays:
-    - Monday
-    - Tuesday
-    - Wednesday
-    - Thursday
-    - Friday
-
+  - Monday
+  - Tuesday
+  - Wednesday
+  - Thursday
+  - Friday
+weekday_consistency:
+  frequency_2_same_weekday: true
+  frequency_4_same_weekday: true
+  frequency_8_same_weekday_pair: true
+clustering:
+  use_distance_matrix: true
+  k_medoids_max_iterations: 30
+  target_cluster_size: 4
+  max_clusters_per_rep: 60
+territory_days:
+  enabled: true
+  hard_client_weekday: false
+  scope: per_rep
+  use_distance_matrix: true
+  max_daily_territory_km: 75
+  route_span_weight: 25
+  route_span_over_limit_weight: 5000
+  load_balance_weight: 250
+  overload_weight: 1000000
+  local_refinement_iterations: 25
+global_geography:
+  enabled: true
+  global_cluster_count: 30
 daily_route:
-  target_clients: 20
-  min_clients: 17
-  max_clients: 22
+  target_clients: 23
+  min_clients: 14
+  max_clients: 27
   allow_underfilled: true
   allow_overfilled: false
-
 candidate_routes:
   candidates_per_rep: 3000
   random_seed: 42
   generation_methods:
-    - periodic_seed
-    - cluster
-    - cluster_neighbors
-    - sweep
-    - nearest_neighbor_expansion
-    - randomized_compact
+  - periodic_seed
+  - cluster
+  - cluster_neighbors
+  - sweep
+  - nearest_neighbor_expansion
+  - randomized_compact
   remove_duplicates: true
-  keep_top_n_per_rep: 3000
+  keep_top_n_per_rep: 2999
   min_candidates_per_client: 6
   cache: true
   max_route_km_median_multiplier: 2.8
-
+selective_day_routing:
+  enabled: true
+  compactness_strength: 1.0
+  pool_size: 45
+  prize_base: 100000
+  urgency_bonus: 5000
+  territory_bonus: 2000
+  territory_mismatch_penalty: 40000
+  preferred_bonus: 1000
+  distance_penalty: 2000
+  freq4_weekday_balance_weight: 50000
+  freq4_territory_mismatch_penalty: 2000
+  freq4_weekday_overload_penalty: 1000000
+  freq4_weekday_capacity_ratio: 0.85
+  frequency2_ideal_gap_days: 10
+  frequency2_close_gap_penalty: 1500
+  frequency2_spacing_bonus: 200
+  frequency2_weekday_balance_weight: 5000
+  frequency2_weekday_overload_penalty: 1000000
+  frequency2_phase_spacing_weight: 1000
+  pyvrp_time_limit_seconds: 2
+  pyvrp_max_iterations: 500
 osrm:
-  url: "http://localhost:5000"
+  url: http://localhost:5000
   use_osrm: true
   use_cache: true
   fallback_to_haversine: true
   request_timeout_seconds: 30
-
+  max_table_locations: 100
 route_costing:
-  method: "nearest_neighbor_2opt"
-  final_method: "pyvrp"
+  method: nearest_neighbor_2opt
+  final_method: pyvrp
   pyvrp_time_limit_seconds: 3
   pyvrp_max_iterations: 500
-  route_type: "open"
+  route_type: open
   use_duration_if_available: true
-
 optimization:
-  solver: "ortools_cpsat"
+  solver: ortools_cpsat
   time_limit_seconds: 3600
   num_workers: 8
   decompose_by_sales_rep: true
   stop_after_first_solution: false
   log_search_progress: true
-
 weights:
-  route_km: 1000
-  underfilled_route: 500
-  over_target_clients: 300
-  bad_spacing_frequency_8: 2000
-  bad_spacing_frequency_2: 2000
-  cluster_mixing: 300
+  route_km: 1000.0
+  underfilled_route: 100.0
+  over_target_clients: 300.0
+  bad_spacing_frequency_8: 2000.0
+  bad_spacing_frequency_2: 2000.0
+  cluster_mixing: 300.0
+  territory_mixing: 1000
+  territory_weekday_violation: 200000
+  territory_client_weekday_violation: 200000
   unused_day: 100
   fixed_weekday_violation: 5000
   preferred_weekday_violation: 500
-
 output:
-  excel_path: "output/final_schedule.xlsx"
-  map_path: "output/maps/final_schedule_map.html"
+  excel_path: output/final_schedule.xlsx
+  map_path: output/maps/final_schedule_map.html

@@ -66,7 +66,40 @@ def export_schedule_excel(
     selected_cols = ["candidate_id", "selected_candidate_id", "day_index", "week_index", "weekday", "sales_rep", "number_of_clients", "route_km", "main_cluster", "clusters_used", "generation_method"]
     selected_export = selected_candidates_df[[c for c in selected_cols if c in selected_candidates_df.columns]].copy()
 
-    final_cols = ["day_index", "week_index", "weekday", "sales_rep", "route_order", "client_id", "client_name", "lat", "lon", "visit_frequency", "cluster_id", "route_km_total", "final_route_method"]
+    final_cols = [
+        "day_index",
+        "week_index",
+        "weekday",
+        "sales_rep",
+        "route_order",
+        "client_id",
+        "client_name",
+        "lat",
+        "lon",
+        "visit_frequency",
+        "cluster_id",
+        "territory_weekday",
+        "global_territory_cluster_id",
+        "global_territory_weekday",
+        "distance_from_previous_km",
+        "cumulative_km",
+        "route_km_total",
+        "final_route_method",
+    ]
+    client_cols = [
+        "sales_rep",
+        "client_id",
+        "client_name",
+        "lat",
+        "lon",
+        "visit_frequency",
+        "cluster_id",
+        "territory_weekday_index",
+        "territory_weekday",
+        "global_territory_cluster_id",
+        "global_territory_weekday_index",
+        "global_territory_weekday",
+    ]
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         final_schedule_df[[c for c in final_cols if c in final_schedule_df.columns]].to_excel(writer, sheet_name="Final_Schedule", index=False)
         daily_routes_df.to_excel(writer, sheet_name="Daily_Routes", index=False)
@@ -75,4 +108,5 @@ def export_schedule_excel(
         validation_df.to_excel(writer, sheet_name="Validation", index=False)
         selected_export.to_excel(writer, sheet_name="Candidate_Routes_Selected", index=False)
         coverage_df.to_excel(writer, sheet_name="Candidate_Coverage", index=False)
+        clients_df[[c for c in client_cols if c in clients_df.columns]].to_excel(writer, sheet_name="Clients_Geography", index=False)
         pd.DataFrame(_flatten_config(config)).to_excel(writer, sheet_name="Parameters", index=False)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+import re
 
 import pandas as pd
 import yaml
@@ -14,6 +15,11 @@ DEFAULT_AUDIT_CONFIG: dict[str, Any] = {
     "working_days": {
         "weeks": 4,
         "weekdays": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+    },
+    "weekday_consistency": {
+        "frequency_2_same_weekday": True,
+        "frequency_4_same_weekday": True,
+        "frequency_8_same_weekday_pair": True,
     },
     "daily_route": {
         "target_clients": 20,
@@ -37,10 +43,10 @@ REQUIRED_CLIENT_COLUMNS = {
     "client_id",
     "client_name",
     "sales_rep",
-    "lat",
-    "lon",
     "visit_frequency",
 }
+
+GPS_COLUMNS = ("gps", "gps_te", "gps_coordinates", "coordinates", "lat_lon", "latlon")
 
 EXPECTED_OPTIONAL_COLUMNS = [
     "fixed_weekday",
@@ -91,7 +97,49 @@ def _normalize_columns(df: pd.DataFrame | None) -> pd.DataFrame:
     if df is None:
         return pd.DataFrame()
     out = df.copy()
-    out.columns = [str(c).strip().lower().replace(" ", "_") for c in out.columns]
+    out.columns = [re.sub(r"[^0-9a-zA-Z]+", "_", str(c).strip().lower()).strip("_") for c in out.columns]
+    return out
+
+
+def _gps_column(df: pd.DataFrame) -> str | None:
+    for col in GPS_COLUMNS:
+        if col in df.columns:
+            return col
+    return None
+
+
+def _parse_gps_value(value: object) -> tuple[float | None, float | None]:
+    if pd.isna(value):
+        return None, None
+    text = str(value).strip().replace("(", "").replace(")", "").replace("[", "").replace("]", "")
+    parts = [part.strip() for part in re.split(r"[,;]", text) if part.strip()]
+    if len(parts) != 2:
+        return None, None
+    lat = pd.to_numeric(parts[0], errors="coerce")
+    lon = pd.to_numeric(parts[1], errors="coerce")
+    if pd.isna(lat) or pd.isna(lon):
+        return None, None
+    return float(lat), float(lon)
+
+
+def _ensure_lat_lon_from_gps(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    gps_col = _gps_column(out)
+    if gps_col is None:
+        return out
+    if "gps" not in out.columns:
+        out["gps"] = out[gps_col]
+    parsed = out[gps_col].map(_parse_gps_value)
+    gps_lat = pd.Series([item[0] for item in parsed], index=out.index, dtype="float64")
+    gps_lon = pd.Series([item[1] for item in parsed], index=out.index, dtype="float64")
+    if "lat" not in out.columns:
+        out["lat"] = gps_lat
+    else:
+        out["lat"] = pd.to_numeric(out["lat"], errors="coerce").fillna(gps_lat)
+    if "lon" not in out.columns:
+        out["lon"] = gps_lon
+    else:
+        out["lon"] = pd.to_numeric(out["lon"], errors="coerce").fillna(gps_lon)
     return out
 
 
@@ -112,7 +160,7 @@ def _calendar(config: dict[str, Any]) -> pd.DataFrame:
 
 
 def _coerce_clients(clients_df: pd.DataFrame) -> pd.DataFrame:
-    out = _normalize_columns(clients_df)
+    out = _ensure_lat_lon_from_gps(_normalize_columns(clients_df))
     for col in EXPECTED_OPTIONAL_COLUMNS:
         if col not in out.columns:
             out[col] = pd.NA
@@ -178,6 +226,10 @@ def _status_from_issues(issues: list[dict[str, Any]]) -> str:
 
 
 def _json_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_value(item) for item in value]
     if pd.isna(value):
         return None
     if hasattr(value, "item"):
@@ -200,6 +252,16 @@ def validate_input_clients_for_audit(
     for col in missing:
         issues.append(_issue("input_validation", "ERROR", f"Missing required column: {col}", details={"field": col}))
     if missing:
+        return issues
+    if not {"lat", "lon"}.issubset(clients.columns):
+        issues.append(
+            _issue(
+                "input_validation",
+                "ERROR",
+                "Missing coordinates: provide a gps column like 42.69804,23.31229 or both lat and lon.",
+                details={"field": "gps"},
+            )
+        )
         return issues
 
     bounds = cfg["audit"]["sofia_bounds"]
@@ -397,6 +459,40 @@ def audit_schedule(
                             sales_rep=client.sales_rep,
                             client_id=cid,
                             details={"week_index": int(week), "expected": expected_weekly, "actual": int(count)},
+                        )
+                    )
+
+        consistency = cfg.get("weekday_consistency", {})
+        if not visits.empty and "weekday" in visits.columns:
+            if freq in {2, 4} and bool(consistency.get(f"frequency_{freq}_same_weekday", True)):
+                weekdays = sorted(set(visits["weekday"].astype(str)))
+                if len(weekdays) > 1:
+                    issues.append(
+                        _issue(
+                            "frequency_correctness",
+                            "ERROR",
+                            f"Client weekday moved between visits: {', '.join(weekdays)}.",
+                            sales_rep=client.sales_rep,
+                            client_id=cid,
+                            details={"weekdays": weekdays},
+                        )
+                    )
+            if freq == 8 and bool(consistency.get("frequency_8_same_weekday_pair", True)):
+                weekly_patterns = {
+                    int(week): tuple(sorted(set(group["weekday"].astype(str))))
+                    for week, group in visits.groupby("week_index")
+                    if len(group) == 2
+                }
+                distinct_patterns = sorted(set(weekly_patterns.values()))
+                if len(distinct_patterns) > 1:
+                    issues.append(
+                        _issue(
+                            "frequency_correctness",
+                            "ERROR",
+                            "Client weekday pair moved between weeks.",
+                            sales_rep=client.sales_rep,
+                            client_id=cid,
+                            details={"weekly_patterns": {str(k): list(v) for k, v in weekly_patterns.items()}},
                         )
                     )
 

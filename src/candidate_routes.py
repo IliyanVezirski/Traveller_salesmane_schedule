@@ -31,6 +31,7 @@ def _candidate_cache_file(df_rep: pd.DataFrame, config: dict) -> Path:
             "min_candidates_per_client": config["candidate_routes"].get("min_candidates_per_client"),
             "max_route_km_median_multiplier": config["candidate_routes"].get("max_route_km_median_multiplier"),
         },
+        "territory_days": config.get("territory_days", {}),
         "daily_route": config["daily_route"],
         "route_costing": {
             "method": config["route_costing"].get("method"),
@@ -115,11 +116,13 @@ def _repair_groups_for_client(
 
 def _selection_score(candidates: pd.DataFrame) -> pd.Series:
     """Score candidates for pruning while keeping route-first costs dominant."""
+    territory_mixing = candidates["territory_mixing_penalty"] if "territory_mixing_penalty" in candidates.columns else pd.Series(0, index=candidates.index)
     return (
         candidates["route_km"].astype(float)
         + candidates["underfilled_penalty"].astype(float) * 5
         + candidates["overfilled_penalty"].astype(float) * 5
         + candidates["cluster_mixing_penalty"].astype(float) * 2
+        + territory_mixing.astype(float) * 3
     )
 
 
@@ -237,6 +240,14 @@ def _filter_patterns_for_weekdays(patterns: list[list[int]], row: Any, day_by_in
     return feasible or patterns
 
 
+def _territory_pattern_penalty(pattern: list[int], row: Any, day_by_index: dict[int, dict[str, int | str]]) -> int:
+    territory = getattr(row, "territory_weekday_index", None)
+    if territory is None or pd.isna(territory):
+        return 0
+    territory_index = int(territory)
+    return sum(1 for day in pattern if int(day_by_index[day]["weekday_index"]) != territory_index)
+
+
 def _add_periodic_seed_candidates(raw: list[dict[str, Any]], df_rep: pd.DataFrame, matrix_data: dict[str, Any], config: dict) -> None:
     """Add a frequency-feasible seed schedule as route-first candidates."""
     days = _calendar_days(config)
@@ -249,12 +260,13 @@ def _add_periodic_seed_candidates(raw: list[dict[str, Any]], df_rep: pd.DataFram
     for row in sorted_df.itertuples(index=False):
         patterns = _filter_patterns_for_weekdays(_frequency_patterns(int(row.visit_frequency), config), row, day_by_index)
         best_pattern: list[int] | None = None
-        best_score: tuple[int, int, int, int] | None = None
+        best_score: tuple[int, int, int, int, int] | None = None
         for pattern in patterns:
             projected = [len(buckets[day]) + 1 for day in pattern]
             hard_over = sum(max(0, load - max_clients) for load in projected)
             target_over = sum(max(0, load - target) for load in projected)
-            score = (hard_over, max(projected), target_over, sum(len(buckets[day]) for day in pattern))
+            territory_penalty = _territory_pattern_penalty(pattern, row, day_by_index)
+            score = (territory_penalty, hard_over, max(projected), target_over, sum(len(buckets[day]) for day in pattern))
             if best_score is None or score < best_score:
                 best_score = score
                 best_pattern = pattern
@@ -291,10 +303,18 @@ def _add_candidate(
 
     cost = calculate_route_cost(client_ids, matrix_data, config["route_costing"].get("method", "nearest_neighbor_2opt"), config["route_costing"].get("route_type", "open"))
     cluster_lookup = df_rep.set_index("client_id")["cluster_id"].astype(str).to_dict()
+    territory_lookup = df_rep.set_index("client_id")["territory_weekday_index"].to_dict() if "territory_weekday_index" in df_rep.columns else {}
     clusters = [cluster_lookup[c] for c in client_ids]
     cluster_counts = pd.Series(clusters).value_counts()
     main_cluster = str(cluster_counts.index[0])
     cluster_count = int(cluster_counts.size)
+    territories = [int(territory_lookup[c]) for c in client_ids if c in territory_lookup and not pd.isna(territory_lookup[c])]
+    territory_weekday_index = None
+    territory_mixing_penalty = 0
+    if territories:
+        territory_counts = pd.Series(territories).value_counts()
+        territory_weekday_index = int(territory_counts.index[0])
+        territory_mixing_penalty = int(len(territories) - int(territory_counts.iloc[0]))
     raw.append(
         {
             "sales_rep": str(df_rep["sales_rep"].iloc[0]),
@@ -305,6 +325,8 @@ def _add_candidate(
             "main_cluster": main_cluster,
             "clusters_used": ",".join(sorted(set(clusters))),
             "cluster_count": cluster_count,
+            "territory_weekday_index": territory_weekday_index,
+            "territory_mixing_penalty": territory_mixing_penalty,
             "generation_method": method,
             "underfilled_penalty": max(0, target - n),
             "overfilled_penalty": max(0, n - target),

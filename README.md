@@ -1,112 +1,85 @@
 # Sales PVRP Scheduler
 
-Route-first Periodic Vehicle Routing Problem scheduler for monthly sales representative visit planning.
+Desktop приложение и Python backend за планиране на месечни посещения на търговски представители. Системата разпределя клиентите по дни, пази правилата за честота на посещение и използва OSRM/PyVRP за по-компактни маршрути.
 
-The backend generates compact candidate daily routes with precomputed `route_km`, then the master optimizer chooses:
+Проектът е насочен към реален работен сценарий: много клиенти, няколко търговски представители, 4-седмичен цикъл, дневен капацитет и нужда маршрутите да не обикалят целия район всеки ден.
 
-```text
-z[candidate_route, day] = 1
-```
+## Основни Възможности
 
-It does not use a client-day-first scheduler.
+- GUI приложение за Windows с табове `Input`, `Parameters`, `Validation`, `Run`, `Results` и `Logs`.
+- CLI режим чрез `python main.py`.
+- Вход от Excel или CSV.
+- Нов входен формат с една `gps` колона: `42.69804,23.31229`.
+- Обратна съвместимост със стария формат `lat` + `lon`.
+- Валидация на входните данни преди оптимизация.
+- OSRM road-distance матрици с chunking за големи групи клиенти.
+- Cache на OSRM матрици, за да не се пресмятат всеки път.
+- Haversine fallback, когато OSRM не е наличен.
+- OSRM-базирано клъстериране чрез k-medoids.
+- Дневни територии по търговец, с наказание за разтеглени пътни зони.
+- Глобална география за анализ, без местене на клиенти между търговци.
+- Селективно дневно планиране: PyVRP избира най-добрите клиенти за деня от позволен pool.
+- Финално PyVRP подреждане на дневния маршрут.
+- HTML карта с филтри по ден, седмица, търговец, локална и глобална територия.
+- Excel export с финален график, дневни маршрути, summary, validation, coverage и параметри.
+- Windows one-folder build чрез PyInstaller.
 
-## Installation
+## Как Работи Логиката
 
-Core CLI/runtime dependencies:
+Текущата логика не е класически route-first solver, който предварително генерира фиксирани маршрути и после избира между тях. Работи по-близо до client-day модел:
 
-```bash
-python -m pip install -r requirements.txt
-```
+1. Зарежда входния файл и нормализира координатите.
+2. Ако има `gps`, автоматично го разделя вътрешно на `lat` и `lon`.
+3. Валидира задължителни колони, координати, честоти и капацитет.
+4. За всеки търговски представител строи OSRM distance matrix.
+5. Прави OSRM-базирани клиентски клъстери.
+6. Разпределя клъстерите към дневни територии, като балансира посещенията и наказва дълги пътни span-ове.
+7. За всеки ден създава pool от допустими клиенти.
+8. Задължителните клиенти за деня влизат твърдо.
+9. PyVRP избира допълнителни клиенти от pool-а до дневния капацитет.
+10. Избраните клиенти се махат от следващи възможности според честотата и правилата.
+11. Накрая PyVRP подрежда реалния дневен маршрут.
 
-GUI dependencies:
+Това позволява на PyVRP да има избор между повече клиенти, вместо да подрежда вече заключен маршрут без свобода.
 
-```bash
-python -m pip install -r requirements-gui.txt
-```
+## Правила За Посещения
 
-Optional PyVRP final-routing dependency:
+Поддържаните честоти са:
 
-```bash
-python -m pip install -r requirements-optional.txt
-```
+- `2`: два пъти месечно.
+- `4`: веднъж седмично.
+- `8`: два пъти седмично.
 
-Development, tests, and packaging:
+Активните consistency правила са:
 
-```bash
-python -m pip install -r requirements-dev.txt -r requirements-optional.txt
-```
+- Клиент с честота `2` се държи в един и същ weekday за двете си посещения, когато е възможно.
+- Клиент с честота `4` се посещава в един и същ weekday всяка седмица.
+- Клиент с честота `8` се държи в двойка weekdays през седмиците.
+- `fixed_weekday` ограничава клиента до конкретен ден или дни.
+- `forbidden_weekdays` забранява дни.
+- `preferred_weekdays` дава меко предпочитание, но не е твърдо правило.
 
-Python 3.11+ is recommended.
+Клиентите не се местят между търговски представители. Географията оптимизира само вътре в района на съответния търговец.
 
-## Run CLI
+## Входен Файл
 
-Fast smoke run with the included sample data:
+Използвайте `data/input_clients_template.xlsx` като референция.
 
-```bash
-python main.py --input data/sample_clients.xlsx --output output/cli_test --no-osrm --no-cache --quiet-solver --time-limit 20 --num-workers 4 --target-clients 6 --min-clients 1 --max-clients 8 --candidates-per-rep 250 --keep-top-n-per-rep 250
-```
-
-Production-style run:
-
-```bash
-python main.py --input data/input_clients.xlsx --config config.yaml --output output
-```
-
-If `data/input_clients.xlsx` does not exist, `python main.py` falls back to `data/sample_clients.xlsx`, but the default production config can take much longer than the smoke command.
-
-## Run GUI
-
-Install GUI dependencies first:
-
-```bash
-python -m pip install -r requirements-gui.txt
-```
-
-```bash
-python run_gui.py
-```
-
-GUI flow:
-
-1. Choose an Excel/CSV input file.
-2. Load and validate the data.
-3. Adjust runtime parameters.
-4. Start optimization.
-5. Open the generated Excel workbook, HTML map, or output folder.
-
-The GUI calls the backend only through:
-
-```python
-from src.pipeline import run_pipeline
-```
-
-## Public Pipeline Contract
-
-```python
-run_pipeline(
-    input_path: str,
-    config: dict,
-    output_dir: str = "output",
-    progress_callback=None,
-    log_callback=None,
-    cancel_checker=None,
-) -> dict
-```
-
-The returned dict includes `status`, `excel_path`, `map_path`, `summary_by_sales_rep`, `summary_by_day`, `validation`, `total_route_km`, and `message`.
-
-## Input Excel Format
-
-Required columns:
+Задължителни колони:
 
 - `client_id`
 - `client_name`
 - `sales_rep`
-- `lat`
-- `lon`
+- `gps`
 - `visit_frequency`
 
-Optional columns:
+Пример за `gps`:
+
+```text
+42.69804,23.31229
+```
+
+Опционални колони:
 
 - `fixed_weekday`
 - `forbidden_weekdays`
@@ -114,127 +87,282 @@ Optional columns:
 - `cluster_manual`
 - `notes`
 
-`visit_frequency` must be one of `2`, `4`, or `8`.
+Старият формат с отделни `lat` и `lon` колони все още се поддържа, но sample файловете вече са в новия `gps` формат.
 
-Included files:
+## Output Файлове
 
-- `data/sample_clients.xlsx`
-- `data/input_clients_template.xlsx`
+По подразбиране резултатите се записват в:
 
-## Output Files
-
-Default workbook:
-
-```bash
-output/final_schedule.xlsx
+```text
+output/
+  final_schedule.xlsx
+  maps/
+    final_schedule_map.html
 ```
 
-Expected sheets:
+Excel workbook-ът съдържа:
 
-- `Final_Schedule`
-- `Daily_Routes`
-- `Summary_By_Sales_Rep`
-- `Summary_By_Day`
-- `Validation`
-- `Candidate_Routes_Selected`
-- `Candidate_Coverage`
-- `Parameters`
+- `Final_Schedule`: всички планирани посещения, включително GPS-derived координати, ред в маршрута, километри и метод.
+- `Daily_Routes`: дневни маршрути с `distance_from_previous_km` и `cumulative_km`.
+- `Summary_By_Sales_Rep`: обобщение по търговски представител.
+- `Summary_By_Day`: обобщение по ден.
+- `Validation`: входни и изходни проверки.
+- `Candidate_Routes_Selected`: избраните дневни client sets.
+- `Candidate_Coverage`: покритие по клиент.
+- `Clients_Geography`: локална и глобална територия по клиент.
+- `Parameters`: използваната конфигурация.
 
-Default map:
+HTML картата позволява филтриране по:
 
-```bash
-output/maps/final_schedule_map.html
+- търговски представител;
+- weekday;
+- week index;
+- day index;
+- локална дневна територия;
+- глобална територия.
+
+## Основни Параметри
+
+### `daily_route`
+
+```yaml
+daily_route:
+  target_clients: 23
+  min_clients: 14
+  max_clients: 27
+  allow_underfilled: true
+  allow_overfilled: false
 ```
 
-## Frequency Rules
+Контролира нормалния и максималния брой клиенти в дневен маршрут.
 
-- Frequency `2`: exactly 2 monthly visits, with Week 1+3 or Week 2+4 preferred.
-- Frequency `4`: exactly 1 visit each week.
-- Frequency `8`: exactly 2 visits each week.
+### `clustering`
 
-These are hard constraints in the route-first master model. Spacing preferences are objective penalties.
+```yaml
+clustering:
+  use_distance_matrix: true
+  k_medoids_max_iterations: 30
+  target_cluster_size: 4
+  max_clusters_per_rep: 60
+```
 
-## Final Routing
+Определя колко фини да са географските клъстери. По-малък `target_cluster_size` дава по-ситна карта и повече свобода за компактни дни.
 
-`route_costing.final_method: "pyvrp"` runs PyVRP for selected daily routes when `route_type: "open"`. The implementation models the route with one vehicle and a zero-cost dummy depot, then writes `final_route_method` to the exported schedule rows. If PyVRP is unavailable or cannot solve a route, the backend falls back to `nearest_neighbor_2opt` and records that fallback method in the same column.
+### `territory_days`
 
-## OSRM Fallback
+```yaml
+territory_days:
+  enabled: true
+  scope: per_rep
+  use_distance_matrix: true
+  max_daily_territory_km: 75
+  route_span_weight: 25
+  route_span_over_limit_weight: 5000
+  local_refinement_iterations: 25
+```
 
-Use OSRM when available:
+Определя как клъстерите се групират към weekdays. Това е ключово за географската компактност. Ако денят започне да се разтяга, увеличете `route_span_over_limit_weight` или намалете `max_daily_territory_km`.
+
+### `selective_day_routing`
+
+```yaml
+selective_day_routing:
+  enabled: true
+  compactness_strength: 1.0
+  pool_size: 45
+  territory_mismatch_penalty: 40000
+  distance_penalty: 2000
+```
+
+Контролира дневния pool и колко силно се предпочитат близки клиенти. По-висок `compactness_strength` прави дните по-сбити, но може да намали гъвкавостта.
+
+### `osrm`
 
 ```yaml
 osrm:
-  url: "http://localhost:5000"
+  url: http://localhost:5000
   use_osrm: true
+  use_cache: true
   fallback_to_haversine: true
+  max_table_locations: 100
 ```
 
-If OSRM is unavailable and `fallback_to_haversine: true`, the backend builds an approximate haversine distance matrix so development and diagnostics can continue. Matrices are cached under `cache/osrm_matrices` when `use_cache` is enabled.
+OSRM се използва за пътни разстояния. Ако OSRM не е достъпен и fallback е включен, приложението продължава с приблизителни haversine разстояния.
 
-## Infeasible Solution Diagnostics
+### `route_costing`
 
-When no feasible route-first plan is found, the pipeline returns `status: "infeasible"` and emits diagnostics for common causes:
-
-- overloaded sales representatives
-- clients with zero or low candidate coverage
-- candidate generation gaps
-- overly tight route size or weekday constraints
-
-Useful first adjustments:
-
-- increase `candidate_routes.candidates_per_rep`
-- increase `candidate_routes.keep_top_n_per_rep`
-- reduce `daily_route.min_clients`
-- set `daily_route.allow_underfilled: true`
-- increase `optimization.time_limit_seconds`
-- relax fixed, preferred, or forbidden weekday constraints
-
-## Smoke Tests
-
-Install development and optional final-routing dependencies first:
-
-```bash
-python -m pip install -r requirements-dev.txt -r requirements-optional.txt
+```yaml
+route_costing:
+  final_method: pyvrp
+  route_type: open
+  pyvrp_time_limit_seconds: 3
 ```
 
-Run the full integration smoke script:
+Финалното подреждане на всеки дневен маршрут се прави с PyVRP, когато е наличен. При проблем има fallback към `nearest_neighbor_2opt`.
 
-```bash
-python scripts/smoke_test.py
+## Стартиране С GUI
+
+Инсталиране:
+
+```bat
+python -m pip install -r requirements.txt
+python -m pip install -r requirements-gui.txt
+python -m pip install -r requirements-optional.txt
 ```
 
-Run the lightweight pytest suite:
+Стартиране:
 
-```bash
-python -m pytest tests
+```bat
+python run_gui.py
 ```
 
-## Troubleshooting
+Работен flow:
 
-- Missing columns: use `data/input_clients_template.xlsx` as the input format reference.
-- Locked Excel file: close `final_schedule.xlsx` before rerunning export.
-- OSRM connection errors: use `--no-osrm` for CLI smoke runs or keep `fallback_to_haversine: true`.
-- Slow solver: lower candidate counts for smoke testing; raise them for production quality.
-- Infeasible result: inspect `Validation`, `Candidate_Coverage`, and CLI/GUI logs before changing business rules.
+1. В `Input` изберете Excel/CSV файл.
+2. Натиснете `Зареди данни`.
+3. Проверете `Validation`.
+4. Настройте параметрите в `Parameters`.
+5. Стартирайте от `Run`.
+6. Отворете Excel, HTML карта или output папката от `Results`.
 
-## Packaging
+## Стартиране С CLI
 
-Install GUI/build dependencies:
+Бърз smoke run без OSRM:
 
-```bash
+```bat
+python main.py --input data/sample_clients.xlsx --output output/cli_test --no-osrm --no-cache --quiet-solver --time-limit 20 --num-workers 4 --target-clients 6 --min-clients 1 --max-clients 8
+```
+
+Production-style run:
+
+```bat
+python main.py --input data/input_clients_template.xlsx --config config.yaml --output output
+```
+
+Проверка на OSRM:
+
+```bat
+python main.py --check-osrm
+```
+
+## Build На Windows EXE
+
+Инсталирайте build dependencies:
+
+```bat
 python -m pip install -r requirements-dev.txt
 ```
 
-Build the Windows one-folder executable:
+Стартирайте:
 
 ```bat
 scripts\build_exe.bat
 ```
 
-Prepare a release folder:
+Готовият build е в:
 
-```bat
-scripts\prepare_release.bat
+```text
+dist/SalesPVRP/SalesPVRP.exe
 ```
 
-Packaging details are in `packaging/PACKAGING_README.md` and `PACKAGING_REPORT.md`.
+Build скриптът копира `config.yaml`, `README_USER.md`, `data/input_clients_template.xlsx` и `data/sample_clients.xlsx` в `dist/SalesPVRP`.
+
+## Тестове
+
+Инсталирайте development dependencies:
+
+```bat
+python -m pip install -r requirements-dev.txt -r requirements-optional.txt
+```
+
+Пълен test suite:
+
+```bat
+python -m pytest
+```
+
+Smoke script:
+
+```bat
+python scripts/smoke_test.py
+```
+
+## Troubleshooting
+
+### `400 Client Error` от OSRM
+
+Проверете дали coordinates се подават като `lon,lat` към OSRM. Входният Excel трябва да е `gps` във формат `lat,lon`, например `42.69804,23.31229`; приложението обръща реда вътрешно за OSRM.
+
+### `No feasible solution`
+
+Най-чести причини:
+
+- твърде много задължителни клиенти в един ден;
+- прекалено нисък `max_clients`;
+- твърде много `fixed_weekday` ограничения;
+- много забранени дни;
+- район с нужни посещения над месечния капацитет.
+
+Първи параметри за проба:
+
+- увеличете `daily_route.max_clients`;
+- намалете `daily_route.min_clients`;
+- оставете `daily_route.allow_underfilled: true`;
+- намалете `selective_day_routing.compactness_strength`;
+- увеличете `selective_day_routing.pool_size`.
+
+### Маршрутите са прекалено разтеглени
+
+Параметри за стягане:
+
+- намалете `territory_days.max_daily_territory_km`;
+- увеличете `territory_days.route_span_over_limit_weight`;
+- увеличете `selective_day_routing.compactness_strength`;
+- намалете `clustering.target_cluster_size`.
+
+### Excel не се презаписва
+
+Затворете `final_schedule.xlsx` в Excel и пуснете оптимизацията отново.
+
+### OSRM не работи
+
+За тестове може да използвате:
+
+```bat
+python main.py --no-osrm
+```
+
+За production резултати стартирайте OSRM server и оставете `osrm.use_osrm: true`.
+
+## Структура На Проекта
+
+```text
+src/
+  pipeline.py                 public GUI/CLI pipeline
+  data_loader.py              Excel/CSV loading and GPS parsing
+  validation.py               input validation
+  osrm_matrix.py              OSRM/haversine distance matrices
+  clustering.py               OSRM k-medoids and weekday territories
+  selective_day_scheduler.py  client-day selective scheduler
+  final_routing.py            PyVRP final route ordering
+  export_excel.py             workbook export
+  map_visualization.py        HTML map export
+gui/
+  PySide6 desktop UI
+data/
+  input_clients_template.xlsx
+  sample_clients.xlsx
+scripts/
+  build_exe.bat
+  build_sample_workbooks.mjs
+  convert_input_workbooks_to_gps.mjs
+tests/
+  pytest suite
+```
+
+## Бележки
+
+- `global_geography` е аналитичен слой и не мести клиенти между търговци.
+- Основната оптимизация е по търговец, за да се пази собствеността на районите.
+- `lat` и `lon` са вътрешни работни колони след зареждане, дори входът да е само `gps`.
+- Output файловете не са част от source control и могат да се регенерират.

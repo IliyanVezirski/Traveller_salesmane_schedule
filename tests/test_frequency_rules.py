@@ -111,6 +111,21 @@ def test_frequency_rules_fail_when_weekly_visit_is_missing() -> None:
     assert any("Expected 1 visits in week 3" in issue["message"] for issue in audit["errors"])
 
 
+def test_frequency_rules_fail_when_client_weekday_moves() -> None:
+    schedule = _schedule()
+    calendar = _calendar().set_index("day_index").to_dict("index")
+    moved = schedule[schedule["client_id"].eq("C1")].index[-1]
+    schedule.loc[moved, "day_index"] = 11
+    schedule.loc[moved, "week_index"] = calendar[11]["week_index"]
+    schedule.loc[moved, "weekday"] = calendar[11]["weekday"]
+
+    audit = audit_schedule(schedule, _clients(), _calendar(), _audit_config())
+
+    assert audit["status"] == "FAIL"
+    assert audit["checks"]["frequency_correctness"]["status"] == "FAIL"
+    assert any("weekday moved" in issue["message"] for issue in audit["errors"])
+
+
 def test_duplicate_same_day_visit_is_fail() -> None:
     schedule = pd.concat([_schedule(), _schedule().head(1)], ignore_index=True)
 

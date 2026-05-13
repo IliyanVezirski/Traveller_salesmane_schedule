@@ -44,6 +44,89 @@ def _config_with_time_limit(config: dict, time_limit_seconds: float) -> dict:
     return updated
 
 
+def _periodic_seed_solution(clients_df: pd.DataFrame, calendar_df: pd.DataFrame, candidates_df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, list[str]]:
+    """Return the deterministic periodic-seed schedule when it is feasible."""
+    if "generation_method" not in candidates_df.columns or "intended_day_index" not in candidates_df.columns:
+        return pd.DataFrame(), ["Periodic seed fallback is unavailable in candidates."]
+
+    seed_df = candidates_df[
+        candidates_df["generation_method"].astype(str).eq("periodic_seed")
+        & candidates_df["intended_day_index"].notna()
+    ].copy()
+    if seed_df.empty:
+        return pd.DataFrame(), ["Periodic seed fallback has no intended-day routes."]
+
+    seed_df["intended_day_index"] = seed_df["intended_day_index"].astype(int)
+    seed_df = seed_df.sort_values(["sales_rep", "intended_day_index", "route_km"]).drop_duplicates(
+        ["sales_rep", "intended_day_index"],
+        keep="first",
+    )
+
+    days = set(calendar_df["day_index"].astype(int).tolist())
+    day_lookup = calendar_df.set_index("day_index").to_dict("index")
+    selected_rows = []
+    route_counts: dict[tuple[str, int], int] = defaultdict(int)
+    day_visit: dict[tuple[str, int], int] = defaultdict(int)
+    for row in seed_df.itertuples(index=False):
+        day = int(row.intended_day_index)
+        if day not in days:
+            continue
+        sales_rep = str(row.sales_rep)
+        route_counts[(sales_rep, day)] += 1
+        for client_id in row.client_ids:
+            day_visit[(str(client_id), day)] += 1
+        base = row._asdict()
+        base.update(day_lookup[day])
+        base["day_index"] = day
+        base["selected_candidate_id"] = str(row.candidate_id)
+        selected_rows.append(base)
+
+    warnings: list[str] = []
+    for (sales_rep, day), count in route_counts.items():
+        if count > 1:
+            warnings.append(f"Periodic seed fallback has {count} routes for {sales_rep} on day {day}.")
+    for (client_id, day), count in day_visit.items():
+        if count > 1:
+            warnings.append(f"Periodic seed fallback visits client {client_id} {count} times on day {day}.")
+
+    for client in clients_df.itertuples(index=False):
+        cid = str(client.client_id)
+        visits = [day for (client_id, day), count in day_visit.items() if client_id == cid for _ in range(count)]
+        freq = int(client.visit_frequency)
+        if len(visits) != freq:
+            warnings.append(f"Periodic seed fallback visits client {cid} {len(visits)} times; expected {freq}.")
+            continue
+
+        fixed = _split_weekdays(getattr(client, "fixed_weekday", None))
+        forbidden = _split_weekdays(getattr(client, "forbidden_weekdays", None))
+        for day in visits:
+            weekday = str(day_lookup[day]["weekday"])
+            if forbidden and weekday in forbidden:
+                warnings.append(f"Periodic seed fallback visits client {cid} on forbidden weekday {weekday}.")
+            if fixed and weekday not in fixed:
+                warnings.append(f"Periodic seed fallback visits client {cid} on {weekday}, outside fixed weekdays.")
+
+        if freq == 4:
+            week_counts = pd.Series([int(day_lookup[day]["week_index"]) for day in visits]).value_counts().to_dict()
+            if any(week_counts.get(int(week), 0) != 1 for week in calendar_df["week_index"].unique()):
+                warnings.append(f"Periodic seed fallback does not visit frequency-4 client {cid} once per week.")
+            if bool(config.get("weekday_consistency", {}).get("frequency_4_same_weekday", True)):
+                weekdays = {int(day_lookup[day]["weekday_index"]) for day in visits}
+                if len(weekdays) != 1:
+                    warnings.append(f"Periodic seed fallback does not keep frequency-4 client {cid} on one weekday.")
+        elif freq == 8:
+            for week in calendar_df["week_index"].unique():
+                week_visits = [day for day in visits if int(day_lookup[day]["week_index"]) == int(week)]
+                if len(week_visits) != 2:
+                    warnings.append(f"Periodic seed fallback visits frequency-8 client {cid} {len(week_visits)} times in week {week}.")
+        elif freq == 2 and len(visits) != 2:
+            warnings.append(f"Periodic seed fallback does not visit frequency-2 client {cid} twice.")
+
+    if warnings:
+        return pd.DataFrame(), warnings
+    return pd.DataFrame(selected_rows), []
+
+
 def _solve_pvrp_master_single(clients_df: pd.DataFrame, calendar_df: pd.DataFrame, candidates_df: pd.DataFrame, config: dict) -> dict[str, Any]:
     """Solve one independent sales_rep route-first PVRP master problem."""
     model = cp_model.CpModel()
@@ -81,8 +164,14 @@ def _solve_pvrp_master_single(clients_df: pd.DataFrame, calendar_df: pd.DataFram
         base += int(row.underfilled_penalty) * int(weights["underfilled_route"])
         base += int(row.overfilled_penalty) * int(weights["over_target_clients"])
         base += int(row.cluster_mixing_penalty) * int(weights["cluster_mixing"])
+        base += int(getattr(row, "territory_mixing_penalty", 0) or 0) * int(weights.get("territory_mixing", weights.get("cluster_mixing", 300)))
+        territory_weekday = getattr(row, "territory_weekday_index", None)
         for day in days:
             objective_terms.append(base * z[(str(row.candidate_id), day)])
+            if territory_weekday is not None and not pd.isna(territory_weekday):
+                day_weekday = int(day_lookup[day]["weekday_index"])
+                if day_weekday != int(territory_weekday):
+                    objective_terms.append(int(weights.get("territory_weekday_violation", 200000)) * z[(str(row.candidate_id), day)])
 
     for client in clients_df.itertuples(index=False):
         cid = str(client.client_id)
@@ -96,6 +185,17 @@ def _solve_pvrp_master_single(clients_df: pd.DataFrame, calendar_df: pd.DataFram
             model.Add(var == sum(z[(candidate_id, day)] for candidate_id in cand_ids))
             model.Add(sum(z[(candidate_id, day)] for candidate_id in cand_ids) <= 1)
             day_visit[day] = var
+
+        client_territory_weekday = getattr(client, "territory_weekday_index", None)
+        if client_territory_weekday is not None and not pd.isna(client_territory_weekday):
+            territory_weight = int(weights.get("territory_client_weekday_violation", weights.get("territory_weekday_violation", 200000)))
+            hard_territory = bool(config.get("territory_days", {}).get("hard_client_weekday", False))
+            for day, visit_var in day_visit.items():
+                if int(day_lookup[day]["weekday_index"]) != int(client_territory_weekday):
+                    if hard_territory:
+                        model.Add(visit_var == 0)
+                    else:
+                        objective_terms.append(territory_weight * visit_var)
 
         freq = int(client.visit_frequency)
         if freq == 2:
@@ -126,6 +226,15 @@ def _solve_pvrp_master_single(clients_df: pd.DataFrame, calendar_df: pd.DataFram
             for week in sorted(calendar_df["week_index"].unique()):
                 week_days = calendar_df.loc[calendar_df["week_index"].eq(week), "day_index"].astype(int).tolist()
                 model.Add(sum(day_visit[d] for d in week_days) == 1)
+            if bool(config.get("weekday_consistency", {}).get("frequency_4_same_weekday", True)):
+                week_count = int(calendar_df["week_index"].nunique())
+                weekday_choices = {}
+                for weekday_index in sorted(calendar_df["weekday_index"].astype(int).unique()):
+                    choice = model.NewBoolVar(f"freq4_same_weekday_{cid}_{weekday_index}")
+                    weekday_days = calendar_df.loc[calendar_df["weekday_index"].astype(int).eq(weekday_index), "day_index"].astype(int).tolist()
+                    model.Add(sum(day_visit[d] for d in weekday_days) == week_count * choice)
+                    weekday_choices[weekday_index] = choice
+                model.Add(sum(weekday_choices.values()) == 1)
         elif freq == 8:
             for week in sorted(calendar_df["week_index"].unique()):
                 week_days = calendar_df.loc[calendar_df["week_index"].eq(week), "day_index"].astype(int).tolist()
@@ -146,7 +255,7 @@ def _solve_pvrp_master_single(clients_df: pd.DataFrame, calendar_df: pd.DataFram
             if forbidden and weekday in forbidden:
                 model.Add(visit_var == 0)
             if fixed and weekday not in fixed:
-                objective_terms.append(int(weights["fixed_weekday_violation"]) * visit_var)
+                model.Add(visit_var == 0)
             if preferred and weekday not in preferred:
                 objective_terms.append(int(weights["preferred_weekday_violation"]) * visit_var)
 
@@ -160,7 +269,17 @@ def _solve_pvrp_master_single(clients_df: pd.DataFrame, calendar_df: pd.DataFram
     status_name = solver.StatusName(status)
 
     if status not in {cp_model.OPTIMAL, cp_model.FEASIBLE}:
-        return {"status": status_name, "selected_candidates": pd.DataFrame(), "objective_value": None, "solver_wall_time": solver.WallTime(), "warnings": _diagnostics(clients_df, candidates_df, config)}
+        seed_selected, seed_warnings = _periodic_seed_solution(clients_df, calendar_df, candidates_df, config)
+        if not seed_selected.empty:
+            return {
+                "status": "FEASIBLE_SEED",
+                "selected_candidates": seed_selected,
+                "objective_value": None,
+                "solver_wall_time": solver.WallTime(),
+                "warnings": [f"CP-SAT status was {status_name}; using periodic seed fallback."],
+            }
+        fallback_warnings = seed_warnings or _diagnostics(clients_df, candidates_df, config)
+        return {"status": status_name, "selected_candidates": pd.DataFrame(), "objective_value": None, "solver_wall_time": solver.WallTime(), "warnings": fallback_warnings}
 
     selected_rows = []
     for (candidate_id, day), var in z.items():
@@ -216,12 +335,13 @@ def solve_pvrp_master(clients_df: pd.DataFrame, calendar_df: pd.DataFrame, candi
             }
 
         selected_frames.append(rep_result["selected_candidates"])
+        warnings.extend([f"{sales_rep}: {warning}" for warning in rep_result.get("warnings", [])])
         if rep_result.get("objective_value") is not None:
             objective_value += float(rep_result["objective_value"])
 
     if all(status == "OPTIMAL" for status in statuses):
         status_name = "OPTIMAL"
-    elif all(status in {"OPTIMAL", "FEASIBLE"} for status in statuses):
+    elif all(status in {"OPTIMAL", "FEASIBLE", "FEASIBLE_SEED"} for status in statuses):
         status_name = "FEASIBLE"
     else:
         status_name = ",".join(statuses)
